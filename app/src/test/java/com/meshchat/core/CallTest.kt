@@ -212,7 +212,7 @@ class CallManagerTest {
         until(what = "A sees declined") { a.ui.phase == CallPhase.ENDED }
         assertEquals(CallEnd.DECLINED, a.ui.endReason)
         assertEquals(CallEnd.DECLINED, b.ui.endReason)
-        assertTrue(a.links.single().closed)
+        until(what = "link closed") { a.links.single().closed }
     }
 
     @Test
