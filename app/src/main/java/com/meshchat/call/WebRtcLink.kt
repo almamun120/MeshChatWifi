@@ -83,9 +83,10 @@ class WebRtcLink(ctx: Context) : CallLink {
         } else {
             val addr = group.hostAddress ?: return@withContext false
             TcpSessions.connect(addr, WifiDirectGroup.PORT, ss, 20_000)
-        } ?: return@withContext false
+        } ?: run { MeshLog.log("webrtc: TCP channel to the other phone failed"); return@withContext false }
         if (closed.get()) { s.close(); return@withContext false }
         stream = s
+        MeshLog.log("webrtc: signalling channel up (host=${session.isHost}, video=${session.video})")
 
         enterCallAudio()
         initFactory()
@@ -101,7 +102,7 @@ class WebRtcLink(ctx: Context) : CallLink {
             s.send(T_SDP_OFFER, offer.description.toByteArray())
         }
         val ok = withTimeoutOrNull(25_000) { connected.await() } == true
-        if (!ok) MeshLog.log("webrtc: no connection")
+        if (!ok) MeshLog.log("webrtc: no connection (ice=${peer.iceConnectionState()})")
         if (ok) { lastRx.set(System.currentTimeMillis()); sendCamera(cameraOn) }
         reader.name = "webrtc-signal"
         ok

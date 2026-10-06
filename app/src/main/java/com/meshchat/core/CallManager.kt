@@ -161,6 +161,7 @@ class CallManager(
         s.jobs += scope.launch { callerLoop(s) }
         s.jobs += scope.launch {
             val p = s.linkImpl!!.host()
+            MeshLog.log("call: host link ${if (p == null) "FAILED" else "ready"}")
             if (p == null) {
                 finish(s, CallEnd.FAILED, CallSignalType.CANCEL)
                 return@launch
@@ -258,6 +259,7 @@ class CallManager(
 
     fun onSignal(peerId: String, sig: CallSignal) {
         if (sig.kind == SessionKind.FILES) return
+        MeshLog.log("call: signal ${sig.type} from ${peerId.take(8)} (${sig.kind})")
         var reply: CallSignal? = null
         var toStart: Session? = null
         var connectHost: Session? = null
@@ -431,6 +433,7 @@ class CallManager(
 
     /** Non-suspending on purpose: it may run inside one of the session's own jobs, which it cancels. */
     private fun finish(s: Session, reason: CallEnd, notify: CallSignalType?) {
+        MeshLog.log("call: end $reason (notify=$notify)")
         val rec: CallRecord
         synchronized(lock) {
             if (cur !== s) return

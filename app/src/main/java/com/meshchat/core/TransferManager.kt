@@ -166,6 +166,7 @@ class TransferManager(
         s.jobs += scope.launch { offerLoop(s) }
         s.jobs += scope.launch {
             val p = s.link!!.host()
+            MeshLog.log("files: host link ${if (p == null) "FAILED" else "ready"}")
             if (p == null) {
                 finish(s, TransferEnd.FAILED, CallSignalType.CANCEL)
                 return@launch
@@ -229,6 +230,7 @@ class TransferManager(
 
     fun onSignal(peerId: String, sig: CallSignal) {
         if (sig.kind != SessionKind.FILES) return
+        MeshLog.log("files: signal ${sig.type} from ${peerId.take(8)}")
         var reply: CallSignal? = null
         var toStart: Session? = null
         var connectHost: Session? = null
@@ -441,6 +443,7 @@ class TransferManager(
     // ------------------------------------------------------------------ ending
 
     private fun finish(s: Session, reason: TransferEnd, notify: CallSignalType?) {
+        MeshLog.log("files: end $reason (notify=$notify)")
         val rec: TransferRecord
         val last: TransferUi
         synchronized(lock) {

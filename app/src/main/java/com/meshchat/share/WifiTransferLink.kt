@@ -12,17 +12,17 @@ import com.meshchat.core.TransferLink
 class WifiTransferLink(ctx: Context) : TransferLink {
     private val group = WifiDirectGroup(ctx, highThroughput = true)
 
-    override suspend fun host(): LinkParams? = group.host(prefer5Ghz = true)
+    override suspend fun host(): LinkParams? = group.host(prefer5Ghz = false)
 
     override suspend fun join(p: LinkParams): Boolean = group.join(p)
 
     override suspend fun openStream(session: StreamSession): SecureStream? {
         return if (session.isHost) {
             val server = group.server ?: return null
-            TcpSessions.accept(server, session, 30_000)
+            TcpSessions.accept(server, session, 30_000).also { if (it == null) com.meshchat.core.MeshLog.log("files: nobody connected to the TCP port") }
         } else {
             val addr = group.hostAddress ?: return null
-            TcpSessions.connect(addr, WifiDirectGroup.PORT, session, 20_000)
+            TcpSessions.connect(addr, WifiDirectGroup.PORT, session, 20_000).also { if (it == null) com.meshchat.core.MeshLog.log("files: could not reach ${addr.hostAddress}") }
         }
     }
 

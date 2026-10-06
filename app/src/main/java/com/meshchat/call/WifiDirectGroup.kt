@@ -56,40 +56,33 @@ class WifiDirectGroup(ctx: Context, private val highThroughput: Boolean) {
     // ------------------------------------------------------------------ host
 
     suspend fun host(prefer5Ghz: Boolean): LinkParams? {
-        val mgr = p2p ?: return null
+        val mgr = p2p ?: run { MeshLog.log("wifi: no Wi-Fi Direct on this phone"); return null }
         val ch = channelOrNull(mgr) ?: return null
         lockWifi()
-        if (act { mgr.removeGroup(ch, it) } != OK) delay(150)          // clear a stale group from an earlier session
+        resetState(mgr, ch)
         var group: WifiP2pGroup? = null
         var ssid = ""
         var pass = ""
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ssid = "DIRECT-mc-" + randomText(4, "ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
-            pass = randomText(12, "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789")
-            val bands = if (prefer5Ghz) listOf(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ, WifiP2pConfig.GROUP_OWNER_BAND_AUTO)
-            else listOf(WifiP2pConfig.GROUP_OWNER_BAND_AUTO)
-            var r = ERROR
-            for (band in bands) {
+        // Band is left to the system (AUTO): forcing 5 GHz fails when the other phone cannot join a 5 GHz group.
+        var r = ERROR
+        for (attempt in 1..3) {
+            if (closed.get()) return null
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ssid = "DIRECT-mc-" + randomText(4, "ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+                pass = randomText(12, "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789")
                 val cfg = WifiP2pConfig.Builder().setNetworkName(ssid).setPassphrase(pass).enablePersistentMode(false)
-                    .setGroupOperatingBand(band).build()
+                    .setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_AUTO).build()
                 r = act { mgr.createGroup(ch, cfg, it) }
-                if (r == OK) break
-                MeshLog.log("wifi: createGroup(band=$band) failed ($r)")
-                act { mgr.removeGroup(ch, it) }
-                delay(300)
-            }
-            if (r != OK || closed.get()) return null
-        } else {
-            var r = act { mgr.createGroup(ch, it) }
-            if (r != OK) {
-                delay(700)
-                act { mgr.removeGroup(ch, it) }
-                delay(300)
+            } else {
                 r = act { mgr.createGroup(ch, it) }
             }
-            if (r != OK || closed.get()) return null
+            MeshLog.log("wifi: createGroup attempt $attempt -> ${reasonName(r)}")
+            if (r == OK) break
+            resetState(mgr, ch)
+            delay(600L * attempt)
         }
+        if (r != OK || closed.get()) return null
 
         var tries = 0
         while (group == null && tries++ < 25) {
@@ -97,14 +90,33 @@ class WifiDirectGroup(ctx: Context, private val highThroughput: Boolean) {
             val g = groupInfo(mgr, ch)
             if (g != null && !g.passphrase.isNullOrEmpty() && !g.networkName.isNullOrEmpty()) group = g else delay(250)
         }
-        val g = group ?: return null
+        val g = group ?: run { MeshLog.log("wifi: group info never became available"); return null }
         return try {
             server = TcpSessions.listen(PORT)
+            MeshLog.log("wifi: group ready, listening on $PORT")
             LinkParams(g.networkName, g.passphrase, g.owner?.deviceAddress.orEmpty(), PORT)
         } catch (e: Exception) {
             MeshLog.log("wifi: cannot open server socket ${e.message}")
             null
         }
+    }
+
+    /** Clears anything left over from an earlier session. A stuck Wi-Fi Direct framework is a usual cause of "the next call never connects". */
+    private suspend fun resetState(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
+        act { mgr.cancelConnect(ch, it) }
+        act { mgr.stopPeerDiscovery(ch, it) }
+        val r = act { mgr.removeGroup(ch, it) }
+        MeshLog.log("wifi: reset (removeGroup -> ${reasonName(r)})")
+        delay(400)
+    }
+
+    private fun reasonName(r: Int) = when (r) {
+        OK -> "ok"
+        WifiP2pManager.ERROR -> "ERROR"
+        WifiP2pManager.P2P_UNSUPPORTED -> "P2P_UNSUPPORTED"
+        WifiP2pManager.BUSY -> "BUSY"
+        WifiP2pManager.NO_SERVICE_REQUESTS -> "NO_SERVICE_REQUESTS"
+        else -> "code $r"
     }
 
     // ------------------------------------------------------------------ guest
@@ -113,13 +125,15 @@ class WifiDirectGroup(ctx: Context, private val highThroughput: Boolean) {
         val mgr = p2p ?: return false
         val ch = channelOrNull(mgr) ?: return false
         lockWifi()
+        resetState(mgr, ch)
+        MeshLog.log("wifi: joining ${p.ssid}")
         repeat(3) { attempt ->
             if (closed.get()) return false
             act { mgr.discoverPeers(ch, it) }                          // lets the phone see the starter's group
             delay(if (attempt == 0) 1_200 else 2_000)
             val r = act { mgr.connect(ch, configFor(p), it) }
             if (r != OK) {
-                MeshLog.log("wifi: connect attempt ${attempt + 1} failed ($r)")
+                MeshLog.log("wifi: connect attempt ${attempt + 1} failed (${reasonName(r)})")
                 return@repeat
             }
             val until = System.currentTimeMillis() + 15_000
@@ -127,11 +141,13 @@ class WifiDirectGroup(ctx: Context, private val highThroughput: Boolean) {
                 val info = connectionInfo(mgr, ch)
                 if (info != null && info.groupFormed && !info.isGroupOwner && info.groupOwnerAddress != null) {
                     hostAddress = info.groupOwnerAddress
+                    MeshLog.log("wifi: joined, owner at ${info.groupOwnerAddress?.hostAddress}")
                     act { mgr.stopPeerDiscovery(ch, it) }
                     return true
                 }
                 delay(400)
             }
+            MeshLog.log("wifi: join attempt ${attempt + 1} timed out")
             act { mgr.cancelConnect(ch, it) }
         }
         return false
