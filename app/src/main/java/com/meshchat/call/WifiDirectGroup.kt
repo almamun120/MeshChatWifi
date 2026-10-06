@@ -64,7 +64,10 @@ class WifiDirectGroup(ctx: Context, private val highThroughput: Boolean) {
         var ssid = ""
         var pass = ""
 
-        // Band is left to the system (AUTO): forcing 5 GHz fails when the other phone cannot join a 5 GHz group.
+        // AUTO lets a dual-band phone pick 5 GHz, which a 2.4 GHz-only phone cannot even see (logs: "group owner not
+        // seen", join timed out, only in that direction). So unless 5 GHz is explicitly preferred, force 2.4 GHz:
+        // every phone supports it. Android 9 and older cannot choose the band.
+        val band = if (prefer5Ghz) WifiP2pConfig.GROUP_OWNER_BAND_AUTO else WifiP2pConfig.GROUP_OWNER_BAND_2GHZ
         var r = ERROR
         for (attempt in 1..3) {
             if (closed.get()) return null
@@ -72,7 +75,7 @@ class WifiDirectGroup(ctx: Context, private val highThroughput: Boolean) {
                 ssid = "DIRECT-mc-" + randomText(4, "ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
                 pass = randomText(12, "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789")
                 val cfg = WifiP2pConfig.Builder().setNetworkName(ssid).setPassphrase(pass).enablePersistentMode(false)
-                    .setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_AUTO).build()
+                    .setGroupOperatingBand(band).build()
                 r = act { mgr.createGroup(ch, cfg, it) }
             } else {
                 r = act { mgr.createGroup(ch, it) }
@@ -93,7 +96,8 @@ class WifiDirectGroup(ctx: Context, private val highThroughput: Boolean) {
         val g = group ?: run { MeshLog.log("wifi: group info never became available"); return null }
         return try {
             server = TcpSessions.listen(PORT)
-            MeshLog.log("wifi: group ready, listening on $PORT")
+            val mhz = if (Build.VERSION.SDK_INT >= 34) runCatching { g.frequency }.getOrDefault(0) else 0
+            MeshLog.log("wifi: group ready, listening on $PORT, band ${if (mhz > 0) "$mhz MHz" else "unknown"}")
             LinkParams(g.networkName, g.passphrase, g.owner?.deviceAddress.orEmpty(), PORT)
         } catch (e: Exception) {
             MeshLog.log("wifi: cannot open server socket ${e.message}")
