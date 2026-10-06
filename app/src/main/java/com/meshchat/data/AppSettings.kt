@@ -28,6 +28,15 @@ object AppSettings {
     private val _callVibrate = MutableStateFlow(true)
     val callVibrate: StateFlow<Boolean> = _callVibrate.asStateFlow()
 
+    /** Announce posts older than this (ms) were cleared by the user and are not stored again when sync re-offers them. */
+    @Volatile var announceClearedAt: Long = 0L
+        private set
+
+    fun markAnnounceCleared() {
+        announceClearedAt = System.currentTimeMillis()
+        prefs.edit().putLong("announce_cleared_at", announceClearedAt).apply()
+    }
+
     fun init(ctx: Context) {
         prefs = ctx.applicationContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
         _downloadTree.value = prefs.getString("download_tree", null)
@@ -36,6 +45,7 @@ object AppSettings {
         _callNotif.value = prefs.getBoolean("notif_calls", true)
         _transferNotif.value = prefs.getBoolean("notif_transfers", true)
         _callVibrate.value = prefs.getBoolean("call_vibrate", true)
+        announceClearedAt = prefs.getLong("announce_cleared_at", 0L)
     }
 
     fun setDownloadTree(uri: Uri?) {

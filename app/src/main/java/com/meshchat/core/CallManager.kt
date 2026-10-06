@@ -64,9 +64,9 @@ enum class StartResult { OK, BUSY, UNREACHABLE, NO_KEY, EMPTY }
 
 data class CallConfig(
     val ringTimeoutMs: Long = 45_000,
-    val connectTimeoutMs: Long = 35_000,
+    val connectTimeoutMs: Long = 45_000,
     val retryMs: Long = 3_000,
-    val poorAfterMs: Long = 2_500,
+    val poorAfterMs: Long = 4_000,
     val lostAfterMs: Long = 10_000,
     val endedLingerMs: Long = 1_800,
     val monitorMs: Long = 500,

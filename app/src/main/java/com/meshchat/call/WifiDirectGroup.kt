@@ -130,7 +130,8 @@ class WifiDirectGroup(ctx: Context, private val highThroughput: Boolean) {
         repeat(3) { attempt ->
             if (closed.get()) return false
             act { mgr.discoverPeers(ch, it) }                          // lets the phone see the starter's group
-            delay(if (attempt == 0) 1_200 else 2_000)
+            val seen = waitForOwner(mgr, ch, p.ownerMac, if (attempt == 0) 6_000 else 4_000)
+            MeshLog.log("wifi: group owner ${if (seen) "visible" else "not seen yet"}, connecting (attempt ${attempt + 1})")
             val r = act { mgr.connect(ch, configFor(p), it) }
             if (r != OK) {
                 MeshLog.log("wifi: connect attempt ${attempt + 1} failed (${reasonName(r)})")
@@ -149,6 +150,26 @@ class WifiDirectGroup(ctx: Context, private val highThroughput: Boolean) {
             }
             MeshLog.log("wifi: join attempt ${attempt + 1} timed out")
             act { mgr.cancelConnect(ch, it) }
+        }
+        return false
+    }
+
+    /** Connecting before the owner shows up in the peer list is a common reason for "join timed out" on some phones. */
+    private suspend fun waitForOwner(mgr: WifiP2pManager, ch: WifiP2pManager.Channel, mac: String, maxMs: Long): Boolean {
+        if (mac.isEmpty()) { delay(1_200); return false }
+        val until = System.currentTimeMillis() + maxMs
+        while (System.currentTimeMillis() < until && !closed.get()) {
+            val seen = suspendCancellableCoroutine<Boolean> { c ->
+                try {
+                    mgr.requestPeers(ch) { list ->
+                        if (c.isActive) c.resume(list.deviceList.any { it.deviceAddress.equals(mac, ignoreCase = true) })
+                    }
+                } catch (e: Exception) {
+                    if (c.isActive) c.resume(false)
+                }
+            }
+            if (seen) return true
+            delay(500)
         }
         return false
     }

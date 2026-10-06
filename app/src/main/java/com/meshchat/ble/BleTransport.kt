@@ -628,6 +628,18 @@ class BleTransport(
                 if (status == BluetoothGatt.GATT_SUCCESS) nextStep() else fail("descriptor write $status")
             }
 
+            /**
+             * The peer restarted its GATT server (new service handles). Our cached characteristics and CCCD
+             * subscriptions are then stale: the link looks connected but delivers nothing until the silence
+             * watchdog kills it ~80 s later (seen in logs as "link ... silent for 8xs"). Drop it now so the
+             * engine reconnects and re-subscribes within a few seconds. Called on Android 12+; older stacks
+             * never invoke it.
+             */
+            override fun onServiceChanged(g: BluetoothGatt) {
+                blog("gatt client ${peerId.take(8)} service changed, reconnecting")
+                close()
+            }
+
             override fun onCharacteristicRead(g: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int) {
                 if (ch.uuid != Protocol.CHAR_NODE_INFO) return
                 val adv = Protocol.decodeAdvert(ch.value)

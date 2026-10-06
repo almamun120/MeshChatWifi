@@ -94,6 +94,9 @@ class WebRtcLink(ctx: Context) : CallLink {
         val peer = createPeer(s, connected) ?: return@withContext false
         pc = peer
         addLocalMedia(peer)
+        // WebRTC starts at ~300 kbit/s and ramps up slowly, which looks blurry for most of a short call.
+        // The Wi-Fi Direct link has plenty of room, so start higher and allow more.
+        runCatching { peer.setBitrate(300_000, 1_500_000, 3_000_000) }
 
         val reader = Thread({ readSignals(s, peer) }, "webrtc-signal").apply { isDaemon = true; start() }
         if (session.isHost) {
@@ -114,6 +117,13 @@ class WebRtcLink(ctx: Context) : CallLink {
         )
         val egl = VideoHub.egl
         factory = PeerConnectionFactory.builder()
+            // The Wi-Fi Direct interface (p2p-wlan0-N) is usually not a ConnectivityManager "Network", so WebRTC's
+            // Android network monitor would filter it out and ICE would only see the ordinary Wi-Fi/mobile network.
+            // Disable the monitor and ignore nothing, so host candidates on the group interface are gathered.
+            .setOptions(PeerConnectionFactory.Options().apply {
+                networkIgnoreMask = 0
+                disableNetworkMonitor = true
+            })
             .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
             .createPeerConnectionFactory()
@@ -139,7 +149,7 @@ class WebRtcLink(ctx: Context) : CallLink {
                 if (track is VideoTrack) VideoHub.setRemote(track)
             }
             override fun onSignalingChange(p0: PeerConnection.SignalingState?) {}
-            override fun onIceConnectionChange(p0: PeerConnection.IceConnectionState?) {}
+            override fun onIceConnectionChange(p0: PeerConnection.IceConnectionState?) { MeshLog.log("webrtc: ice $p0") }
             override fun onIceConnectionReceivingChange(p0: Boolean) {}
             override fun onIceGatheringChange(p0: PeerConnection.IceGatheringState?) {}
             override fun onIceCandidatesRemoved(p0: Array<out IceCandidate>?) {}
@@ -172,10 +182,19 @@ class WebRtcLink(ctx: Context) : CallLink {
         videoSource = f.createVideoSource(false)
         capturer = enumerator.createCapturer(name, null)
         capturer?.initialize(textureHelper, appCtx, videoSource!!.capturerObserver)
-        capturer?.startCapture(1280, 720, 30)
+        capturer?.startCapture(VIDEO_W, VIDEO_H, VIDEO_FPS)
         cameraOn = true
         localVideo = f.createVideoTrack("v0", videoSource)
-        peer.addTrack(localVideo, listOf("ms0"))
+        val sender = peer.addTrack(localVideo, listOf("ms0"))
+        runCatching {
+            val params = sender.parameters
+            params.encodings.forEach { e ->
+                e.maxBitrateBps = 2_500_000
+                e.minBitrateBps = 300_000
+                e.maxFramerate = VIDEO_FPS
+            }
+            sender.setParameters(params)
+        }
         VideoHub.setLocal(localVideo)
     }
 
@@ -285,7 +304,7 @@ class WebRtcLink(ctx: Context) : CallLink {
         if (!video) return
         cameraOn = on
         localVideo?.setEnabled(on)
-        runCatching { if (on) capturer?.startCapture(1280, 720, 30) else capturer?.stopCapture() }
+        runCatching { if (on) capturer?.startCapture(VIDEO_W, VIDEO_H, VIDEO_FPS) else capturer?.stopCapture() }
         sendCamera(on)
     }
 
@@ -332,5 +351,9 @@ class WebRtcLink(ctx: Context) : CallLink {
         const val T_SDP_ANSWER = 2
         const val T_ICE = 3
         const val T_CAMERA = 4
+        // 540p/24 fps: sharp enough, and low-end phones' hardware encoders keep up (720p/30 made them drop frames).
+        const val VIDEO_W = 960
+        const val VIDEO_H = 540
+        const val VIDEO_FPS = 24
     }
 }

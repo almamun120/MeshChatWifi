@@ -80,7 +80,8 @@ class RoomMeshStore(private val db: MeshDatabase, private val mediaDir: File) : 
     override suspend fun markSent(msgIdHex: String) = messages.markSent(msgIdHex)
 
     override suspend fun savePost(post: PostRecord): Boolean =
-        posts.insert(
+        if (post.timestamp <= AppSettings.announceClearedAt) false      // cleared by the user; sync must not bring it back
+        else posts.insert(
             PublicPostEntity(
                 post.key, post.authorId, post.authorName, post.content,
                 post.timestamp, post.receivedAt, post.verified, post.raw,

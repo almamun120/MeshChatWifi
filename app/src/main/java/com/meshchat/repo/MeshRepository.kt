@@ -354,6 +354,21 @@ class MeshRepository(private val context: Context) {
 
     suspend fun markChatRead(peerId: String) = db.chatDao().markRead(peerId)
 
+    /** Removes every message of the conversation (and its image/voice files). With [removeChat] the chat row goes too. */
+    suspend fun clearChat(peerId: String, removeChat: Boolean) = withContext(Dispatchers.IO) {
+        db.messageDao().mediaPaths(peerId).forEach { runCatching { java.io.File(it).delete() } }
+        db.messageDao().deleteForPeer(peerId)
+        val chat = db.chatDao().get(peerId)
+        if (removeChat) db.chatDao().delete(peerId)
+        else if (chat != null) db.chatDao().upsert(chat.copy(lastMessage = "", unread = 0))
+    }
+
+    /** Clears this phone's copy of the public room. Older posts are not re-imported by sync. */
+    suspend fun clearAnnounce() = withContext(Dispatchers.IO) {
+        com.meshchat.data.AppSettings.markAnnounceCleared()
+        db.postDao().deleteAll()
+    }
+
     suspend fun setBlocked(peerId: String, value: Boolean) {
         engineFlow.value?.setBlocked(peerId, value)
     }

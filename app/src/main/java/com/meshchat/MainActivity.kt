@@ -39,6 +39,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import com.meshchat.ui.ConfirmDialog
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -186,6 +189,20 @@ private fun MainScaffold(vm: MainViewModel, myNodeId: String, myName: String, re
     val scope = rememberCoroutineScope()
     val showMessage: (String) -> Unit = { m -> scope.launch { snackbar.showSnackbar(m) } }
     val startCall = rememberCallStarter(vm, showMessage)
+    var chatMenu by remember { mutableStateOf(false) }
+    var confirm by remember { mutableStateOf<String?>(null) }       // "clear", "delete" or "announce"
+    (screen as? Screen.Chat)?.let { cs ->
+        when (confirm) {
+            "clear" -> ConfirmDialog("Clear chat?", "All messages in this chat will be removed from this phone.", "Clear",
+                { vm.clearChat(cs.peerId, removeChat = false) }, { confirm = null })
+            "delete" -> ConfirmDialog("Delete chat?", "The chat and all its messages will be removed from this phone.", "Delete",
+                { vm.clearChat(cs.peerId, removeChat = true); vm.back() }, { confirm = null })
+        }
+    }
+    if (confirm == "announce") {
+        ConfirmDialog("Clear announcements?", "Removes all announcements from this phone. Older ones will not come back.", "Clear",
+            { vm.clearAnnounce() }, { confirm = null })
+    }
 
     BackHandler(enabled = screen != Screen.Tabs) { vm.back() }
 
@@ -230,6 +247,16 @@ private fun MainScaffold(vm: MainViewModel, myNodeId: String, myName: String, re
                     if (cs is Screen.Chat) {
                         IconButton(onClick = { startCall(cs.peerId, true) }) { Text("📹") }
                         IconButton(onClick = { startCall(cs.peerId, false) }) { Icon(Icons.Default.Call, "Call") }
+                        Box {
+                            IconButton(onClick = { chatMenu = true }) { Text("⋮") }
+                            DropdownMenu(expanded = chatMenu, onDismissRequest = { chatMenu = false }) {
+                                DropdownMenuItem(text = { Text("Clear chat") }, onClick = { chatMenu = false; confirm = "clear" })
+                                DropdownMenuItem(text = { Text("Delete chat") }, onClick = { chatMenu = false; confirm = "delete" })
+                            }
+                        }
+                    }
+                    if (cs == Screen.Announce) {
+                        IconButton(onClick = { confirm = "announce" }) { Text("🗑") }
                     }
                 },
                 navigationIcon = {

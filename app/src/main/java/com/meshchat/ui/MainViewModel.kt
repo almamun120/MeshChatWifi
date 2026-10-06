@@ -238,6 +238,14 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { repo.setBlocked(peerId, true) }
     }
 
+    fun clearChat(peerId: String, removeChat: Boolean) {
+        viewModelScope.launch { repo.clearChat(peerId, removeChat) }
+    }
+
+    fun clearAnnounce() {
+        viewModelScope.launch { repo.clearAnnounce() }
+    }
+
     fun syncNow() = repo.syncNow()
 
     val myNodeId: String get() = repo.myNodeId

@@ -9,7 +9,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -42,7 +44,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -54,6 +58,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.meshchat.core.NodeIds
 import com.meshchat.data.UserEntity
+import com.meshchat.repo.ChatRow
 import com.meshchat.repo.PeerUi
 
 // ---------------------------------------------------------------------------------------------- Home
@@ -169,10 +174,21 @@ private fun PeerRow(p: PeerUi, now: Long, onClick: () -> Unit) {
 
 // ---------------------------------------------------------------------------------------------- Chats
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatsScreen(vm: MainViewModel, onOpenChat: (String) -> Unit) {
     val chats by vm.chats.collectAsState()
     val now by rememberNow()
+    var toDelete by remember { mutableStateOf<ChatRow?>(null) }
+    toDelete?.let { c ->
+        ConfirmDialog(
+            title = "Delete chat?",
+            text = "All messages with ${c.name} will be removed from this phone. The other person keeps their copy.",
+            confirmLabel = "Delete",
+            onConfirm = { vm.clearChat(c.peerId, removeChat = true) },
+            onDismiss = { toDelete = null },
+        )
+    }
     if (chats.isEmpty()) {
         EmptyState("No private chats yet.\nOpen the Nearby tab and tap a user to start one.")
         return
@@ -180,7 +196,7 @@ fun ChatsScreen(vm: MainViewModel, onOpenChat: (String) -> Unit) {
     LazyColumn(Modifier.fillMaxSize()) {
         items(chats, key = { it.peerId }) { c ->
             Row(
-                Modifier.fillMaxWidth().clickable { onOpenChat(c.peerId) }.padding(horizontal = 16.dp, vertical = 12.dp),
+                Modifier.fillMaxWidth().combinedClickable(onClick = { onOpenChat(c.peerId) }, onLongClick = { toDelete = c }).padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Avatar(c.name)
@@ -265,6 +281,7 @@ fun MeScreen(vm: MainViewModel, user: UserEntity, onOpenDebug: () -> Unit, onOpe
         }
 
         Button(onClick = onOpenSettings, modifier = Modifier.fillMaxWidth()) { Text("Settings") }
+        OutlinedButton(onClick = { com.meshchat.share.AppShare.send(ctx) }, modifier = Modifier.fillMaxWidth()) { Text("Share this app (Bluetooth / Quick Share / WhatsApp)") }
         OutlinedButton(onClick = onOpenAbout, modifier = Modifier.fillMaxWidth()) { Text("About the developer") }
         OutlinedButton(onClick = onOpenTopology, modifier = Modifier.fillMaxWidth()) { Text("Mesh visualization") }
         OutlinedButton(onClick = onOpenDebug, modifier = Modifier.fillMaxWidth()) { Text("Debug") }

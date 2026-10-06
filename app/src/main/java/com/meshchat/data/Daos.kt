@@ -58,6 +58,9 @@ interface ChatDao {
 
     @Query("UPDATE chat SET unread = 0 WHERE peerId = :peerId")
     suspend fun markRead(peerId: String)
+
+    @Query("DELETE FROM chat WHERE peerId = :peerId")
+    suspend fun delete(peerId: String)
 }
 
 @Dao
@@ -70,6 +73,12 @@ interface MessageDao {
 
     @Query("UPDATE message SET status = :status WHERE msgId = :msgId")
     suspend fun setStatus(msgId: String, status: String)
+
+    @Query("SELECT mediaPath FROM message WHERE peerId = :peerId AND mediaPath IS NOT NULL")
+    suspend fun mediaPaths(peerId: String): List<String>
+
+    @Query("DELETE FROM message WHERE peerId = :peerId")
+    suspend fun deleteForPeer(peerId: String)
 
     /** QUEUED -> SENT only, so a fast ACK (DELIVERED) is never overwritten. */
     @Query("UPDATE message SET status = 'SENT' WHERE msgId = :msgId AND status = 'QUEUED'")
@@ -92,6 +101,9 @@ interface PostDao {
 
     @Query("SELECT authorId, postKey FROM public_post ORDER BY timestamp DESC LIMIT :limit")
     suspend fun recentRefs(limit: Int): List<PostRefRow>
+
+    @Query("DELETE FROM public_post")
+    suspend fun deleteAll()
 
     @Query("DELETE FROM public_post WHERE receivedAt < :cutoff")
     suspend fun deleteOlderThan(cutoff: Long)
