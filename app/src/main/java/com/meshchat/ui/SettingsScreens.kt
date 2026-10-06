@@ -9,6 +9,10 @@ import android.provider.DocumentsContract
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -44,6 +48,7 @@ fun SettingsScreen() {
     val callN by AppSettings.callNotifications.collectAsState()
     val xferN by AppSettings.transferNotifications.collectAsState()
     val vib by AppSettings.callVibrate.collectAsState()
+    val use5 by AppSettings.use5Ghz.collectAsState()
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
@@ -69,6 +74,14 @@ fun SettingsScreen() {
                 OutlinedButton(onClick = { folderPicker.launch(null) }) { Text("Choose folder") }
                 if (tree != null) OutlinedButton(onClick = { AppSettings.setDownloadTree(null) }) { Text("Reset") }
             }
+        }
+        Section("Wi-Fi Direct band") {
+            SwitchRow("Use 5 GHz (faster, shorter range)", use5, AppSettings::setUse5Ghz)
+            Text(
+                "Off = 2.4 GHz: works with every phone and reaches further. On = 5 GHz: smoother video and faster file transfer, " +
+                    "but only if both phones support 5 GHz Wi-Fi Direct. The phone that starts the call or transfer decides.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+            )
         }
         Section("Ringtone") {
             Text(
@@ -147,15 +160,18 @@ fun AboutScreen() {
         Text("MeshChat", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Text("Offline chat, calls and file sharing over Bluetooth, Wi-Fi Direct and GPS", textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.outline)
         Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("Developer", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
                 Text("আব্দুল্লাহ আল মামুন", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(8.dp))
                 HorizontalDivider()
-                InfoRow("Phone", "+8801945120109") { ctx.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:+8801945120109"))) }
-                InfoRow("Email", "mamun995599@gmail.com") {
+                InfoRow("📞", "Phone", "+8801945120109") { ctx.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:+8801945120109"))) }
+                HorizontalDivider()
+                InfoRow("✉", "Email", "mamun995599@gmail.com") {
                     ctx.startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:mamun995599@gmail.com")))
                 }
-                InfoRow("Address", "সিদ্ধিরগঞ্জ, ওয়ার্ড-৪, পোস্ট অফিস: ১৪২৮, নারায়ণগঞ্জ, বাংলাদেশ", null)
+                HorizontalDivider()
+                InfoRow("📍", "Address", "সিদ্ধিরগঞ্জ, ওয়ার্ড-৪, পোস্ট অফিস: ১৪২৮, নারায়ণগঞ্জ, বাংলাদেশ", null)
             }
         }
         Text("Version ${com.meshchat.BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
@@ -163,11 +179,20 @@ fun AboutScreen() {
 }
 
 @Composable
-private fun InfoRow(label: String, value: String, onClick: (() -> Unit)?) {
-    Column(Modifier.fillMaxWidth()) {
-        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
-        if (onClick != null) {
-            androidx.compose.material3.TextButton(onClick = { runCatching(onClick) }, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) { Text(value) }
-        } else Text(value)
+private fun InfoRow(icon: String, label: String, value: String, onClick: (() -> Unit)?) {
+    Row(
+        Modifier.fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable { runCatching(onClick) } else Modifier)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(icon, fontSize = 20.sp, modifier = Modifier.width(36.dp))
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+            Text(
+                value, style = MaterialTheme.typography.bodyLarge,
+                color = if (onClick != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+            )
+        }
     }
 }

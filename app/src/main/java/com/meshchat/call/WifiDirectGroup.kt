@@ -111,7 +111,7 @@ class WifiDirectGroup(ctx: Context, private val highThroughput: Boolean) {
         act { mgr.stopPeerDiscovery(ch, it) }
         val r = act { mgr.removeGroup(ch, it) }
         MeshLog.log("wifi: reset (removeGroup -> ${reasonName(r)})")
-        delay(400)
+        delay(200)
     }
 
     private fun reasonName(r: Int) = when (r) {

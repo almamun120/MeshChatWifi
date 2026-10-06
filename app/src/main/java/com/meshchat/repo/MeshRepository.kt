@@ -168,7 +168,7 @@ class MeshRepository(private val context: Context) {
                     override suspend fun callKey(peerId: String, callId: ByteArray) = engine.callKey(peerId, callId)
                     override fun isReachable(peerId: String) = engine.isReachable(peerId)
                 }
-                val calls = CallManager(scope, signaler, gate, { WebRtcLink(appContext) }, ::onCallFinished)
+                val calls = CallManager(scope, signaler, gate, { WebRtcLink(appContext) }, ::onCallFinished, com.meshchat.core.CallConfig(prejoin = true))
                 val transfers = TransferManager(scope, signaler, gate, { WifiTransferLink(appContext) }, { DownloadsSink(appContext) }, ::onTransferFinished)
                 callMgr.value = calls
                 xferMgr.value = transfers
@@ -206,7 +206,11 @@ class MeshRepository(private val context: Context) {
         engineFlow.value?.setDiscoveryMode(currentMode())
     }
 
+    /** Bluetooth scanning shares the 2.4 GHz radio with Wi-Fi Direct; keep it quiet while a call is connecting or active. */
+    @Volatile private var callBusy = false
+
     private fun currentMode(): DiscoveryMode = when {
+        callBusy -> DiscoveryMode.LOW
         !appVisible -> DiscoveryMode.LOW
         openChatPeer != null -> DiscoveryMode.HIGH
         else -> DiscoveryMode.NORMAL
@@ -245,6 +249,11 @@ class MeshRepository(private val context: Context) {
         }
         if (ui.inCall != (lastCallPhase != com.meshchat.core.CallPhase.IDLE && lastCallPhase != com.meshchat.core.CallPhase.ENDED)) {
             com.meshchat.service.MeshService.setCallActive(appContext, ui.inCall, ui.video)
+        }
+        val busy = ui.phase == com.meshchat.core.CallPhase.CONNECTING || ui.phase == com.meshchat.core.CallPhase.ACTIVE
+        if (busy != callBusy) {
+            callBusy = busy
+            engineFlow.value?.setDiscoveryMode(currentMode())
         }
         lastCallPhase = ui.phase
     }

@@ -37,6 +37,11 @@ object AppSettings {
         prefs.edit().putLong("announce_cleared_at", announceClearedAt).apply()
     }
 
+    private val _use5Ghz = MutableStateFlow(false)
+    /** Wi-Fi Direct band for calls and file transfers started on this phone: false = 2.4 GHz (works with every phone), true = 5 GHz where both support it. */
+    val use5Ghz: StateFlow<Boolean> = _use5Ghz.asStateFlow()
+    fun setUse5Ghz(v: Boolean) { _use5Ghz.value = v; prefs.edit().putBoolean("wifi_5ghz", v).apply() }
+
     fun init(ctx: Context) {
         prefs = ctx.applicationContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
         _downloadTree.value = prefs.getString("download_tree", null)
@@ -45,6 +50,7 @@ object AppSettings {
         _callNotif.value = prefs.getBoolean("notif_calls", true)
         _transferNotif.value = prefs.getBoolean("notif_transfers", true)
         _callVibrate.value = prefs.getBoolean("call_vibrate", true)
+        _use5Ghz.value = prefs.getBoolean("wifi_5ghz", false)
         announceClearedAt = prefs.getLong("announce_cleared_at", 0L)
     }
 

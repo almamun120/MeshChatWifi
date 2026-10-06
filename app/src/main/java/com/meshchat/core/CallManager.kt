@@ -67,9 +67,11 @@ data class CallConfig(
     val connectTimeoutMs: Long = 45_000,
     val retryMs: Long = 3_000,
     val poorAfterMs: Long = 4_000,
-    val lostAfterMs: Long = 10_000,
+    val lostAfterMs: Long = 20_000,
     val endedLingerMs: Long = 1_800,
     val monitorMs: Long = 500,
+    /** Callee joins the caller's Wi-Fi Direct group while the phone is still ringing, so Answer connects in a second or two. */
+    val prejoin: Boolean = false,
 )
 
 /** How the managers talk to the mesh. MeshRepository adapts MeshEngine to this. */
@@ -135,6 +137,7 @@ class CallManager(
         var params: LinkParams? = null
         var connectedAt = 0L
         var linkImpl: CallLink? = null
+        var prejoin: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
         val jobs = mutableListOf<Job>()
     }
 
@@ -179,7 +182,7 @@ class CallManager(
             s = cur ?: return
             if (s.outgoing || s.phase != CallPhase.INCOMING) return
             s.phase = CallPhase.CONNECTING
-            s.linkImpl = newLink(s)
+            if (s.linkImpl == null) s.linkImpl = newLink(s)
             publish(s)
         }
         s.jobs += scope.launch {                         // keep telling the caller until we are connected
@@ -195,7 +198,8 @@ class CallManager(
                 finish(s, CallEnd.FAILED, CallSignalType.END)
                 return@launch
             }
-            if (!s.linkImpl!!.join(p)) {
+            val joinedEarly = s.prejoin?.await() == true
+            if (!joinedEarly && !s.linkImpl!!.join(p)) {
                 finish(s, CallEnd.FAILED, CallSignalType.END)
                 return@launch
             }
@@ -264,6 +268,7 @@ class CallManager(
         var toStart: Session? = null
         var connectHost: Session? = null
         var ended: Triple<Session, CallEnd, CallSignalType?>? = null
+        var prejoinNow: Session? = null
 
         synchronized(lock) {
             val s = cur
@@ -291,6 +296,7 @@ class CallManager(
                 }
                 CallSignalType.LINK -> if (mine && !s!!.outgoing && sig.link != null && s.params == null) {
                     s.params = sig.link
+                    if (config.prejoin && s.phase == CallPhase.INCOMING) prejoinNow = s
                 }
                 CallSignalType.ACCEPT -> if (mine && s!!.outgoing && (s.phase == CallPhase.CALLING || s.phase == CallPhase.RINGING)) {
                     s.phase = CallPhase.CONNECTING
@@ -314,6 +320,7 @@ class CallManager(
 
         reply?.let { r -> scope.launch { signaler.send(peerId, r) } }
         toStart?.let { s -> s.jobs += scope.launch { incomingLoop(s) } }
+        prejoinNow?.let { startPrejoin(it) }
         connectHost?.let { s ->
             s.jobs += scope.launch {
                 if (awaitParams(s) == null) {
@@ -325,6 +332,20 @@ class CallManager(
             s.jobs += scope.launch { connectWatchdog(s) }
         }
         ended?.let { (s, why, notify) -> finish(s, why, notify) }
+    }
+
+    /** Callee: start joining the caller's group while still ringing. finish() closes the link if the call never gets answered. */
+    private fun startPrejoin(s: Session) {
+        val p = s.params ?: return
+        val link: CallLink
+        val done = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        synchronized(lock) {
+            if (cur !== s || s.phase != CallPhase.INCOMING || s.linkImpl != null) return
+            link = newLink(s)
+            s.linkImpl = link
+            s.prejoin = done
+        }
+        s.jobs += scope.launch { done.complete(runCatching { link.join(p) }.getOrDefault(false)) }
     }
 
     // ------------------------------------------------------------------ loops

@@ -12,7 +12,7 @@ import com.meshchat.core.TransferLink
 class WifiTransferLink(ctx: Context) : TransferLink {
     private val group = WifiDirectGroup(ctx, highThroughput = true)
 
-    override suspend fun host(): LinkParams? = group.host(prefer5Ghz = false)
+    override suspend fun host(): LinkParams? = group.host(prefer5Ghz = com.meshchat.data.AppSettings.use5Ghz.value)
 
     override suspend fun join(p: LinkParams): Boolean = group.join(p)
 

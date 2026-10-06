@@ -66,7 +66,7 @@ class WebRtcLink(ctx: Context) : CallLink {
     private var savedMode = AudioManager.MODE_NORMAL
     private var savedSpeaker = false
 
-    override suspend fun host(): LinkParams? = group.host(prefer5Ghz = false)
+    override suspend fun host(): LinkParams? = group.host(prefer5Ghz = com.meshchat.data.AppSettings.use5Ghz.value)
 
     override suspend fun join(p: LinkParams): Boolean = group.join(p)
 
@@ -96,7 +96,7 @@ class WebRtcLink(ctx: Context) : CallLink {
         addLocalMedia(peer)
         // WebRTC starts at ~300 kbit/s and ramps up slowly, which looks blurry for most of a short call.
         // The Wi-Fi Direct link has plenty of room, so start higher and allow more.
-        runCatching { peer.setBitrate(300_000, 1_500_000, 3_000_000) }
+        runCatching { peer.setBitrate(300_000, 700_000, 1_500_000) }
 
         val reader = Thread({ readSignals(s, peer) }, "webrtc-signal").apply { isDaemon = true; start() }
         if (session.isHost) {
@@ -189,7 +189,7 @@ class WebRtcLink(ctx: Context) : CallLink {
         runCatching {
             val params = sender.parameters
             params.encodings.forEach { e ->
-                e.maxBitrateBps = 2_500_000
+                e.maxBitrateBps = 1_500_000
                 e.minBitrateBps = 300_000
                 e.maxFramerate = VIDEO_FPS
             }
@@ -351,9 +351,9 @@ class WebRtcLink(ctx: Context) : CallLink {
         const val T_SDP_ANSWER = 2
         const val T_ICE = 3
         const val T_CAMERA = 4
-        // 540p/24 fps: sharp enough, and low-end phones' hardware encoders keep up (720p/30 made them drop frames).
-        const val VIDEO_W = 960
-        const val VIDEO_H = 540
+        // 480p/24 fps at <= 1.5 Mbit/s: smooth on 2.4 GHz Wi-Fi Direct and within what low-end hardware encoders can do.
+        const val VIDEO_W = 854
+        const val VIDEO_H = 480
         const val VIDEO_FPS = 24
     }
 }
