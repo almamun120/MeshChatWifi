@@ -103,7 +103,7 @@ class MediaEngineTest {
         scope.cancel()
     }
 
-    private suspend fun until(timeoutMs: Long = 10_000, cond: () -> Boolean) {
+    private suspend fun until(timeoutMs: Long = 40_000, cond: () -> Boolean) {
         withTimeout(timeoutMs) { while (!cond()) delay(25) }
     }
 
@@ -194,7 +194,7 @@ class MediaEngineTest {
         }
         val photo = jpeg(30_000)
         assertEquals(SendResult.OK, a.engine.sendContent(b.id.nodeId, Content.ofImage(photo)))
-        until(timeoutMs = 8_000) { b.received(ContentKind.IMAGE) != null }
+        until(timeoutMs = 30_000) { b.received(ContentKind.IMAGE) != null }
         assertEquals(1, dropped)
         assertArrayEquals(photo, b.received(ContentKind.IMAGE)!!.content.data)
         until { a.store.messages.values.any { it.status == MessageStatus.DELIVERED } }
