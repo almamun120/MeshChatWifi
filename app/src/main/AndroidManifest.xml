@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- BLE হার্ডওয়্যার ছাড়া এই অ্যাপ অর্থহীন -->
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="true" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.location.gps"
+        android:required="false" />
+
+    <!--
+        ===== PERMISSION ব্যাখ্যা (Android সংস্করণ অনুযায়ী) =====
+
+        Android 12+ (API 31+):
+          BLUETOOTH_SCAN      → আশেপাশের MeshChat node খোঁজা।
+                                "neverForLocation" দেওয়া হয়েছে কারণ আমরা BLE scan থেকে লোকেশন বের করি না
+                                এবং ফলে Location permission লাগে না। (Android docs: এই flag দিলে beacon-জাতীয়
+                                advertisement ফিল্টার হয়; আমাদের custom service UUID প্রভাবিত হয় না।)
+          BLUETOOTH_ADVERTISE → নিজের Node ID advertise করা।
+          BLUETOOTH_CONNECT   → GATT server/client connection।
+
+        Android 11 ও নিচে (API ≤ 30):
+          BLUETOOTH, BLUETOOTH_ADMIN → পুরোনো install-time Bluetooth permission।
+          ACCESS_FINE_LOCATION       → BLE scan ফলাফল পেতে OS বাধ্য করে (এবং Location সুইচ ON থাকতে হয়)।
+                                       আমরা GPS ডেটা পড়ি না, পাঠাই না।
+
+        Android 13+ (API 33+):
+          POST_NOTIFICATIONS → Foreground service notification ও নতুন বার্তার নোটিফিকেশন।
+
+        Android 9+ / 14+:
+          FOREGROUND_SERVICE, FOREGROUND_SERVICE_CONNECTED_DEVICE → mesh চালু রাখতে Foreground Service
+          (type connectedDevice; Android 14-এ বাধ্যতামূলক declaration)।
+    -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <!--
+        ACCESS_FINE_LOCATION / ACCESS_COARSE_LOCATION (all Android versions):
+          * Android <= 11: required by the OS for BLE scanning (see above).
+          * All versions: used ONLY when the user taps "Share location" in a private chat and confirms. One-shot GPS
+            fix, sent end-to-end encrypted to that one person. Never read in the background, never broadcast.
+        RECORD_AUDIO: voice messages (asked the first time the user holds the mic button).
+    -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Calls and file sharing: Wi-Fi Direct link, microphone / camera, ringtone vibration, lock-screen call UI. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="tiramisu" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <!-- File browser: read the user's photos / videos / music. Documents go through the system picker (no permission). -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <application
+        android:name=".MeshChatApp"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.MeshChat">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".service.MeshService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice|microphone|camera" />
+    </application>
+</manifest>

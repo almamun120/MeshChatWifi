@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MeshChat</string>
+    <string name="notif_channel_service">Mesh service</string>
+    <string name="notif_channel_messages">Messages</string>
+    <string name="notif_service_title">MeshChat চালু আছে</string>
+    <string name="notif_service_text">কাছাকাছি node খোঁজা হচ্ছে</string>
+</resources>
