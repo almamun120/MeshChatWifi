@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -203,6 +204,7 @@ fun MicHoldButton(
     onStart: () -> Boolean,
     onSlide: (dx: Float, cancelling: Boolean) -> Unit,
     onEnd: (cancelled: Boolean) -> Unit,
+    label: String? = null,
 ) {
     val start by rememberUpdatedState(onStart)
     val slide by rememberUpdatedState(onSlide)
@@ -230,5 +232,5 @@ fun MicHoldButton(
                 }
             },
         contentAlignment = Alignment.Center,
-    ) { MicIcon(Color.White) }
+    ) { if (label != null) Text(label, fontSize = 22.sp) else MicIcon(Color.White) }
 }

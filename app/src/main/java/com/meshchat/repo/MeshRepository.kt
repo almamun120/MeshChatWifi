@@ -32,6 +32,9 @@ import com.meshchat.core.Route
 import com.meshchat.core.SendResult
 import com.meshchat.core.TransportStatus
 import com.meshchat.data.ChatEntity
+import com.meshchat.data.ChatPrefEntity
+import com.meshchat.data.GroupEntity
+import com.meshchat.data.SosEntity
 import com.meshchat.data.MeshDatabase
 import com.meshchat.data.MessageEntity
 import com.meshchat.data.PublicPostEntity
@@ -47,6 +50,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
@@ -67,9 +71,13 @@ data class PeerUi(
     val lastSeen: Long,
     val reachable: Boolean,
     val canEncrypt: Boolean,   // we hold their public key
+    val email: String = "",
 )
 
-data class ChatRow(val peerId: String, val name: String, val lastMessage: String, val lastTimestamp: Long, val unread: Int)
+data class ChatRow(
+    val peerId: String, val name: String, val lastMessage: String, val lastTimestamp: Long, val unread: Int,
+    val pinned: Boolean = false, val muted: Boolean = false, val isGroup: Boolean = false,
+)
 
 /**
  * Single access point for the UI: owns the database, the identity, the BLE transport and the MeshEngine.
@@ -98,11 +106,92 @@ class MeshRepository(private val context: Context) {
     val transferUi: Flow<TransferUi> = xferMgr.flatMapLatest { it?.ui ?: flowOf(TransferUi()) }
 
     @Volatile private var myName: String = ""
+    @Volatile private var myEmail: String = ""
     @Volatile var myNodeId: String = ""
         private set
 
     @Volatile private var appVisible = false
     @Volatile private var openChatPeer: String? = null
+
+    init {
+        // Disappearing messages: check every few seconds so they vanish close to their time.
+        scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(5_000)
+                runCatching { store.purgeExpiredMessages(System.currentTimeMillis()) }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- SOS
+
+    val sosList: Flow<List<SosEntity>> = db.sosDao().observeAll()
+    val sosActive: Flow<Boolean> = com.meshchat.data.AppSettings.sosActive
+    suspend fun markSosSeen() = db.sosDao().markAllSeen()
+    suspend fun clearSos() = db.sosDao().deleteAll()
+
+    private var sosSession: com.meshchat.core.SosSession? = null
+    private var lastSosLocation: com.meshchat.core.SosLocation? = null
+
+    private fun batteryPercent(): Int {
+        val bm = appContext.getSystemService(android.content.Context.BATTERY_SERVICE) as? android.os.BatteryManager
+        val v = bm?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+        return if (v in 0..100) v else com.meshchat.core.SosCodec.UNKNOWN_BATTERY
+    }
+
+    private fun session(): com.meshchat.core.SosSession = sosSession ?: com.meshchat.core.SosSession(scope, send = { active -> sendSosOnce(active) }).also { sosSession = it }
+
+    private suspend fun sendSosOnce(active: Boolean) {
+        val e = engineFlow.value
+        if (e == null) return
+        var loc: com.meshchat.core.SosLocation? = null
+        if (active && com.meshchat.data.AppSettings.sosIncludeLocation) {
+            // Fresh fix when possible, otherwise the last one we had. Only ever attached because the user ticked the box.
+            val fix = com.meshchat.media.LocationHelper.current(appContext, 8_000)
+            if (fix != null) lastSosLocation = com.meshchat.core.SosLocation(fix.latitude, fix.longitude, if (fix.hasAccuracy()) fix.accuracy.toInt() else 0)
+            loc = lastSosLocation
+        }
+        e.sendSos(active, batteryPercent(), loc)
+    }
+
+    /** Starts broadcasting an SOS (repeats until [stopSos]). Needs the mesh to be running. */
+    fun startSos(includeLocation: Boolean): Boolean {
+        if (engineFlow.value == null) return false
+        com.meshchat.data.AppSettings.setSosIncludeLocation(includeLocation)
+        com.meshchat.data.AppSettings.setSosActive(true)
+        session().start()
+        return true
+    }
+
+    fun stopSos() {
+        com.meshchat.data.AppSettings.setSosActive(false)
+        sosSession?.stopSafe()
+        lastSosLocation = null
+    }
+
+    private suspend fun onSos(a: com.meshchat.core.SosAlert) {
+        if (!com.meshchat.data.AppSettings.sosAlerts.value) return          // receiver opted out: still relayed by the engine
+        if (db.nodeDao().get(a.nodeId)?.blocked == true) return
+        val old = db.sosDao().observeAll().first().firstOrNull { it.nodeId == a.nodeId }
+        val loc = a.location
+        db.sosDao().upsert(
+            SosEntity(
+                a.nodeId, a.name.ifBlank { NodeIds.display(a.nodeId) }, a.active, a.battery, loc != null, loc?.lat ?: 0.0, loc?.lon ?: 0.0,
+                loc?.accuracyM ?: 0, a.timestamp, a.hops, a.verified, seen = appVisible && openSosScreen,
+            ),
+        )
+        val firstOfThisAlert = old == null || old.active != a.active
+        if (firstOfThisAlert) {
+            val detail = (if (a.active) "Needs help" else "Cancelled the alert") + " • ${a.hops} hop(s) away" +
+                (if (a.battery <= 100) " • battery ${a.battery}%" else "") + (if (loc != null) " • location attached" else "")
+            Notifier.notifySos(appContext, a.nodeId, a.name.ifBlank { NodeIds.display(a.nodeId) }, a.active, detail)
+        }
+    }
+
+    @Volatile var openSosScreen = false
+
+    /** Incoming push-to-talk clips that should be played right away (the ViewModel owns the player). */
+    val pttPlay = kotlinx.coroutines.flow.MutableSharedFlow<MessageEntity>(extraBufferCapacity = 8)
 
     // ---------------------------------------------------------------- profile
 
@@ -112,17 +201,56 @@ class MeshRepository(private val context: Context) {
      * Creates the profile. The identity key pair (and so the Node ID) is created here if it does not exist yet.
      * DOB is stored locally only. Name is the only profile field that ever leaves the phone (inside signed packets).
      */
-    suspend fun createProfile(name: String, dobEpochDay: Long, showDob: Boolean): UserEntity = withContext(Dispatchers.IO) {
+    suspend fun createProfile(name: String, dobEpochDay: Long, showDob: Boolean, email: String = ""): UserEntity = withContext(Dispatchers.IO) {
         val id = vault.loadOrCreate()
         val user = UserEntity(
             id = 1, name = name.trim(), dobEpochDay = dobEpochDay, showDob = showDob,
-            photoPath = null, nodeId = id.nodeId, createdAt = System.currentTimeMillis(),
+            photoPath = null, nodeId = id.nodeId, createdAt = System.currentTimeMillis(), email = email.trim(),
         )
         db.userDao().upsert(user)
         myNodeId = id.nodeId
         myName = user.name
+        myEmail = user.email
         user
     }
+
+    /** Changes the optional e-mail and sends the new identity to everybody in range. */
+    suspend fun setEmail(email: String) = withContext(Dispatchers.IO) {
+        val u = db.userDao().get() ?: return@withContext
+        db.userDao().upsert(u.copy(email = email.trim()))
+        myEmail = email.trim()
+        engineFlow.value?.refreshIdentity()
+    }
+
+    /** Passphrase-protected JSON backup of the identity + profile; null if there is no profile yet. */
+    suspend fun exportBackup(passphrase: CharArray): String? = withContext(Dispatchers.IO) {
+        val u = db.userDao().get() ?: return@withContext null
+        com.meshchat.core.IdentityBackup.export(vault.loadOrCreate(), u.name, u.dobEpochDay, u.showDob, passphrase)
+    }
+
+    /** Restores a backup; only allowed while no profile exists (fresh install). Returns null on success or the error. */
+    suspend fun importBackup(json: String, passphrase: CharArray): com.meshchat.core.RestoreError? = withContext(Dispatchers.IO) {
+        if (db.userDao().get() != null) return@withContext com.meshchat.core.RestoreError.CORRUPT
+        val r = com.meshchat.core.IdentityBackup.restore(json, passphrase)
+        val d = r.data ?: return@withContext r.error
+        val id = com.meshchat.core.Identity.restore(d.privatePkcs8, d.publicX509)
+        vault.save(id)
+        db.userDao().upsert(
+            UserEntity(id = 1, name = d.name, dobEpochDay = d.dobEpochDay, showDob = d.showDob,
+                photoPath = null, nodeId = id.nodeId, createdAt = System.currentTimeMillis()),
+        )
+        myNodeId = id.nodeId
+        myName = d.name
+        null
+    }
+
+    fun readUriText(uri: Uri): String? = runCatching {
+        appContext.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
+    }.getOrNull()
+
+    fun writeUriText(uri: Uri, text: String): Boolean = runCatching {
+        appContext.contentResolver.openOutputStream(uri, "wt")?.use { it.write(text.toByteArray(Charsets.UTF_8)) } != null
+    }.getOrDefault(false)
 
     suspend fun setShowDob(value: Boolean) = db.userDao().setShowDob(value)
 
@@ -158,9 +286,10 @@ class MeshRepository(private val context: Context) {
                 if (user.nodeId != identity.nodeId) db.userDao().setNodeId(identity.nodeId)   // keystore key was lost -> new identity
                 myNodeId = identity.nodeId
                 myName = user.name
+                myEmail = user.email
 
                 val transport = BleTransport(appContext, identity.nodeId, Cap.ALL, scope)
-                val engine = MeshEngine(identity, { myName }, transport, store, scope)
+                val engine = MeshEngine(identity, { myName }, transport, store, scope, pttAllowed = { com.meshchat.data.AppSettings.pttEnabled.value }, emailProvider = { myEmail })
                 transportFlow.value = transport
                 engineFlow.value = engine
                 val signaler = object : CallSignaler {
@@ -168,7 +297,11 @@ class MeshRepository(private val context: Context) {
                     override suspend fun callKey(peerId: String, callId: ByteArray) = engine.callKey(peerId, callId)
                     override fun isReachable(peerId: String) = engine.isReachable(peerId)
                 }
-                val calls = CallManager(scope, signaler, gate, { WebRtcLink(appContext) }, ::onCallFinished, com.meshchat.core.CallConfig(prejoin = true))
+                val calls = CallManager(scope, signaler, gate, { WebRtcLink(appContext) }, ::onCallFinished, com.meshchat.core.CallConfig(
+                    prejoin = true,
+                    acceptPtt = { com.meshchat.data.AppSettings.pttEnabled.value },
+                    autoAnswerPtt = { com.meshchat.data.AppSettings.pttAutoAnswer.value },
+                ))
                 val transfers = TransferManager(scope, signaler, gate, { WifiTransferLink(appContext) }, { DownloadsSink(appContext) }, ::onTransferFinished)
                 callMgr.value = calls
                 xferMgr.value = transfers
@@ -181,12 +314,15 @@ class MeshRepository(private val context: Context) {
                 eventsJob = scope.launch { engine.events.collect(::onMeshEvent) }
                 engine.setDiscoveryMode(currentMode())
                 engine.start()
+                if (com.meshchat.data.AppSettings.sosActive.value) session().start()      // my SOS survives an app restart
             }
         }
     }
 
     fun stopMesh() {
         eventsJob?.cancel()
+        sosSession?.let { it.stopSafe() }
+        sosSession = null
         callMgr.value?.hangUp()
         xferMgr.value?.cancel()
         alerts.release()
@@ -219,15 +355,24 @@ class MeshRepository(private val context: Context) {
     private suspend fun onMeshEvent(e: MeshEvent) {
         when (e) {
             is MeshEvent.PrivateReceived -> {
+                if (e.ptt && appVisible && com.meshchat.data.AppSettings.pttAutoPlay.value) {
+                    db.messageDao().get(e.msgIdHex)?.let { pttPlay.tryEmit(it) }
+                }
                 if (!appVisible || openChatPeer != e.peerId) {
-                    val name = db.nodeDao().get(e.peerId)?.name?.ifBlank { null } ?: NodeIds.display(e.peerId)
-                    Notifier.notifyMessage(appContext, e.peerId, name, e.preview)
+                    val muted = db.chatPrefDao().get(e.peerId)?.muted == true
+                    val name = db.groupDao().get(e.peerId)?.name ?: db.nodeDao().get(e.peerId)?.name?.ifBlank { null } ?: NodeIds.display(e.peerId)
+                    if (!muted) Notifier.notifyMessage(appContext, e.peerId, name, e.preview)
                 } else {
                     db.chatDao().markRead(e.peerId)
                 }
             }
             is MeshEvent.PostReceived -> if (!appVisible) Notifier.notifyMessage(appContext, "announce", "Announce • ${e.authorName}", e.content)
             is MeshEvent.Delivered -> Unit
+            is MeshEvent.GroupGone -> {
+                clearChat(e.groupId, removeChat = true)
+                db.chatPrefDao().delete(e.groupId)
+            }
+            is MeshEvent.SosReceived -> onSos(e.alert)
             is MeshEvent.CallSignalReceived ->
                 if (e.signal.kind == SessionKind.FILES) xferMgr.value?.onSignal(e.peerId, e.signal)
                 else callMgr.value?.onSignal(e.peerId, e.signal)
@@ -242,7 +387,7 @@ class MeshRepository(private val context: Context) {
     /** Incoming-call notification (so a call is noticed with the screen off) and the service's media foreground type. */
     private suspend fun onCallState(ui: CallUi) {
         if (ui.phase == com.meshchat.core.CallPhase.INCOMING && lastCallPhase != ui.phase) {
-            Notifier.incomingCall(appContext, peerName(ui.peerId), ui.video)
+            if (!(ui.ptt && com.meshchat.data.AppSettings.pttAutoAnswer.value)) Notifier.incomingCall(appContext, peerName(ui.peerId), ui.video, ui.ptt)
         }
         if (ui.phase != com.meshchat.core.CallPhase.INCOMING && lastCallPhase == com.meshchat.core.CallPhase.INCOMING) {
             Notifier.cancelIncomingCall(appContext)
@@ -272,7 +417,7 @@ class MeshRepository(private val context: Context) {
 
     // ---------------------------------------------------------------- calls
 
-    fun startCall(peerId: String, video: Boolean): StartResult = callMgr.value?.startCall(peerId, video) ?: StartResult.UNREACHABLE
+    fun startCall(peerId: String, video: Boolean, ptt: Boolean = false): StartResult = callMgr.value?.startCall(peerId, video, ptt) ?: StartResult.UNREACHABLE
     fun acceptCall() { callMgr.value?.accept() }
     fun rejectCall() { callMgr.value?.reject() }
     fun hangUp() { callMgr.value?.hangUp() }
@@ -323,42 +468,101 @@ class MeshRepository(private val context: Context) {
                 rssi = nbr?.rssi?.takeIf { it != 0 },
                 lastSeen = maxOf(nbr?.lastSeen ?: 0L, route?.updated ?: 0L, node?.lastSeen ?: 0L),
                 reachable = reachable,
+                email = node?.email ?: "",
                 canEncrypt = node?.publicKey != null,
             )
         }.filter { it.reachable || it.canEncrypt }
             .sortedWith(compareByDescending<PeerUi> { it.reachable }.thenBy { it.hops ?: 99 }.thenBy { it.name.lowercase() })
     }
 
-    val chats: Flow<List<ChatRow>> = combine(db.chatDao().observeAll(), db.nodeDao().observeAll()) { chats: List<ChatEntity>, nodes ->
+    val chats: Flow<List<ChatRow>> = combine(
+        db.chatDao().observeAll(), db.nodeDao().observeAll(), db.chatPrefDao().observeAll(), db.groupDao().observeAll(),
+    ) { chats: List<ChatEntity>, nodes, prefs, groups ->
         val names = nodes.associate { it.nodeId to it.name }
-        chats.map { ChatRow(it.peerId, names[it.peerId]?.ifBlank { null } ?: NodeIds.display(it.peerId), it.lastMessage, it.lastTimestamp, it.unread) }
+        val prefBy = prefs.associateBy { it.peerId }
+        val groupBy = groups.associateBy { it.id }
+        chats.map {
+            val g = groupBy[it.peerId]
+            ChatRow(
+                it.peerId, g?.name ?: names[it.peerId]?.ifBlank { null } ?: NodeIds.display(it.peerId), it.lastMessage, it.lastTimestamp, it.unread,
+                pinned = prefBy[it.peerId]?.pinned == true, muted = prefBy[it.peerId]?.muted == true, isGroup = g != null,
+            )
+        }.sortedWith(compareByDescending<ChatRow> { it.pinned }.thenByDescending { it.lastTimestamp })
+    }
+
+    /** Settings of every chat (pin / mute / disappearing timer). */
+    val chatPrefs: Flow<Map<String, ChatPrefEntity>> = db.chatPrefDao().observeAll().map { l -> l.associateBy { it.peerId } }
+
+    fun group(id: String): Flow<GroupEntity?> = db.groupDao().observeAll().map { l -> l.firstOrNull { it.id == id } }
+
+    private suspend fun pref(peerId: String) = db.chatPrefDao().get(peerId) ?: ChatPrefEntity(peerId, pinned = false, muted = false, disappearSec = 0)
+    suspend fun setPinned(peerId: String, v: Boolean) = db.chatPrefDao().upsert(pref(peerId).copy(pinned = v))
+    suspend fun setChatMuted(peerId: String, v: Boolean) = db.chatPrefDao().upsert(pref(peerId).copy(muted = v))
+    suspend fun setDisappear(peerId: String, sec: Int) = db.chatPrefDao().upsert(pref(peerId).copy(disappearSec = sec))
+
+    /** Text search in one chat, or across all chats when [peerId] is null. */
+    suspend fun search(query: String, peerId: String?): List<MessageEntity> {
+        val q = query.trim()
+        if (q.isEmpty()) return emptyList()
+        val esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return db.messageDao().search(esc, peerId)
+    }
+
+    /** Applies the chat's disappearing timer and an optional reply reference to outgoing content. */
+    private suspend fun decorate(peerId: String, c: Content, reply: MessageEntity? = null): Content {
+        val ttl = db.chatPrefDao().get(peerId)?.disappearSec ?: 0
+        return if (ttl == 0 && reply == null) c
+        else c.copyEnvelope(ttlSec = ttl, replyToId = reply?.msgId ?: "", replyQuote = reply?.preview()?.take(60) ?: "")
+    }
+
+    suspend fun deleteMessage(peerId: String, m: MessageEntity, forEveryone: Boolean) {
+        val e = engineFlow.value
+        if (e != null) e.deleteMessage(peerId, m.msgId, forEveryone && m.outgoing) else store.deleteMessageLocal(m.msgId)
+    }
+
+    /** Creates a private group; returns its id or null (a member's key is unknown, bad name, too many members). */
+    suspend fun createGroup(name: String, members: List<String>): String? = engineFlow.value?.createGroup(name, members)
+
+    /** Creator only: new name and/or new member list ([others] = all members except me). */
+    suspend fun updateGroup(id: String, name: String?, others: List<String>?): Boolean =
+        engineFlow.value?.updateGroup(id, name, others) ?: false
+
+    /** Removes a person who is not currently on the mesh from this phone's list (they reappear if heard again). */
+    suspend fun forgetPeer(nodeId: String) = db.nodeDao().delete(nodeId)
+
+    suspend fun leaveGroup(id: String) {
+        engineFlow.value?.leaveGroup(id) ?: db.groupDao().delete(id)
+        clearChat(id, removeChat = true)
+        db.chatPrefDao().delete(id)
     }
 
     fun messages(peerId: String): Flow<List<MessageEntity>> = db.messageDao().observe(peerId)
 
     fun nodeName(peerId: String): Flow<String> =
-        db.nodeDao().observeAll().map { list -> list.firstOrNull { it.nodeId == peerId }?.name?.ifBlank { null } ?: NodeIds.display(peerId) }
+        if (com.meshchat.core.GroupIds.isGroup(peerId)) db.groupDao().observeAll().map { l -> l.firstOrNull { it.id == peerId }?.name ?: "Group" }
+        else db.nodeDao().observeAll().map { list -> list.firstOrNull { it.nodeId == peerId }?.name?.ifBlank { null } ?: NodeIds.display(peerId) }
 
     // ---------------------------------------------------------------- actions
 
     suspend fun sendAnnounce(text: String): SendResult = engineFlow.value?.sendAnnounce(text) ?: SendResult.NOT_RUNNING
 
-    suspend fun sendPrivate(peerId: String, text: String): SendResult = engineFlow.value?.sendPrivate(peerId, text) ?: SendResult.NOT_RUNNING
+    suspend fun sendPrivate(peerId: String, text: String, reply: MessageEntity? = null): SendResult =
+        engineFlow.value?.sendContent(peerId, decorate(peerId, Content.ofText(text), reply)) ?: SendResult.NOT_RUNNING
 
     /** One-time, user-initiated location share to ONE person (end-to-end encrypted). Never broadcast. */
     suspend fun sendLocation(peerId: String, lat: Double, lon: Double, accuracyM: Int): SendResult =
-        engineFlow.value?.sendContent(peerId, Content.ofLocation(lat, lon, accuracyM)) ?: SendResult.NOT_RUNNING
+        engineFlow.value?.sendContent(peerId, decorate(peerId, Content.ofLocation(lat, lon, accuracyM))) ?: SendResult.NOT_RUNNING
 
     /** Compresses the picked photo (<= 480 px, ~20-45 KB JPEG, metadata stripped) and sends it. */
     suspend fun sendImage(peerId: String, uri: Uri): SendResult {
         val jpeg = withContext(Dispatchers.IO) { ImageCodec.compress(appContext, uri) } ?: return SendResult.BAD_MEDIA
-        return engineFlow.value?.sendContent(peerId, Content.ofImage(jpeg)) ?: SendResult.NOT_RUNNING
+        return engineFlow.value?.sendContent(peerId, decorate(peerId, Content.ofImage(jpeg))) ?: SendResult.NOT_RUNNING
     }
 
-    suspend fun sendVoice(peerId: String, rec: RecordedVoice): SendResult {
+    suspend fun sendVoice(peerId: String, rec: RecordedVoice, ptt: Boolean = false): SendResult {
         val audio = withContext(Dispatchers.IO) { runCatching { rec.file.readBytes() }.getOrNull().also { rec.file.delete() } }
             ?: return SendResult.BAD_MEDIA
-        return engineFlow.value?.sendContent(peerId, Content.ofVoice(rec.codec, rec.durationMs, rec.waveform, audio)) ?: SendResult.NOT_RUNNING
+        return engineFlow.value?.sendContent(peerId, decorate(peerId, Content.ofVoice(rec.codec, rec.durationMs, rec.waveform, audio).copyEnvelope(ptt = ptt))) ?: SendResult.NOT_RUNNING
     }
 
     suspend fun markChatRead(peerId: String) = db.chatDao().markRead(peerId)

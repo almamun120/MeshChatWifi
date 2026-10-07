@@ -38,6 +38,9 @@ interface NodeDao {
     @Query("SELECT * FROM node")
     fun observeAll(): Flow<List<NodeEntity>>
 
+    @Query("DELETE FROM node WHERE nodeId = :id")
+    suspend fun delete(id: String)
+
     @Query("SELECT nodeId FROM node WHERE blocked = 1")
     suspend fun blockedIds(): List<String>
 
@@ -80,9 +83,58 @@ interface MessageDao {
     @Query("DELETE FROM message WHERE peerId = :peerId")
     suspend fun deleteForPeer(peerId: String)
 
+    @Query("SELECT * FROM message WHERE msgId = :msgId")
+    suspend fun get(msgId: String): MessageEntity?
+
+    @Query("DELETE FROM message WHERE msgId = :msgId")
+    suspend fun delete(msgId: String)
+
+    @Query("SELECT * FROM message WHERE peerId = :peerId ORDER BY timestamp DESC LIMIT 1")
+    suspend fun last(peerId: String): MessageEntity?
+
+    @Query("SELECT * FROM message WHERE expiresAt > 0 AND expiresAt <= :now")
+    suspend fun expired(now: Long): List<MessageEntity>
+
+    /** Text search in one chat ([peerId] non-null) or across all chats. LIKE wildcards are escaped by the caller. */
+    @Query("SELECT * FROM message WHERE kind = 'TEXT' AND text LIKE '%' || :q || '%' ESCAPE '\\' AND (:peerId IS NULL OR peerId = :peerId) ORDER BY timestamp DESC LIMIT 100")
+    suspend fun search(q: String, peerId: String?): List<MessageEntity>
+
     /** QUEUED -> SENT only, so a fast ACK (DELIVERED) is never overwritten. */
     @Query("UPDATE message SET status = 'SENT' WHERE msgId = :msgId AND status = 'QUEUED'")
     suspend fun markSent(msgId: String)
+}
+
+@Dao
+interface ChatPrefDao {
+    @Query("SELECT * FROM chat_pref")
+    fun observeAll(): Flow<List<ChatPrefEntity>>
+
+    @Query("SELECT * FROM chat_pref WHERE peerId = :peerId")
+    suspend fun get(peerId: String): ChatPrefEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(pref: ChatPrefEntity)
+
+    @Query("DELETE FROM chat_pref WHERE peerId = :peerId")
+    suspend fun delete(peerId: String)
+}
+
+@Dao
+interface GroupDao {
+    @Query("SELECT * FROM chat_group")
+    fun observeAll(): Flow<List<GroupEntity>>
+
+    @Query("SELECT * FROM chat_group WHERE id = :id")
+    suspend fun get(id: String): GroupEntity?
+
+    @Query("SELECT * FROM chat_group")
+    suspend fun all(): List<GroupEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(group: GroupEntity)
+
+    @Query("DELETE FROM chat_group WHERE id = :id")
+    suspend fun delete(id: String)
 }
 
 @Dao
@@ -158,4 +210,19 @@ interface MediaOutDao {
 
     @Query("DELETE FROM media_out WHERE expiresAt <= :now")
     suspend fun deleteExpired(now: Long)
+}
+
+@Dao
+interface SosDao {
+    @Query("SELECT * FROM sos_event ORDER BY active DESC, timestamp DESC")
+    fun observeAll(): Flow<List<SosEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(e: SosEntity)
+
+    @Query("UPDATE sos_event SET seen = 1")
+    suspend fun markAllSeen()
+
+    @Query("DELETE FROM sos_event")
+    suspend fun deleteAll()
 }

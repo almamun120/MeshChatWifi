@@ -11,7 +11,9 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -65,6 +67,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import com.meshchat.core.GroupIds
 import com.meshchat.core.MediaLimits
 import com.meshchat.core.NodeIds
 import com.meshchat.core.Protocol
@@ -170,6 +173,18 @@ fun ChatScreen(vm: MainViewModel, peerId: String, onMessage: (String) -> Unit, m
     var pendingApprox by remember { mutableStateOf<Boolean?>(null) }
     var viewingImage by remember { mutableStateOf<String?>(null) }
     var cancelling by remember { mutableStateOf(false) }
+    var pttClip by remember(peerId) { mutableStateOf(false) }
+    var replyTo by remember(peerId) { mutableStateOf<MessageEntity?>(null) }
+    var searchOpen by remember(peerId) { mutableStateOf(false) }
+    var query by remember(peerId) { mutableStateOf("") }
+    val isGroup = GroupIds.isGroup(peerId)
+    val group by remember(peerId) { vm.group(peerId) }.collectAsState(initial = null)
+    val prefs by vm.chatPrefs.collectAsState()
+    val disappearSec = prefs[peerId]?.disappearSec ?: 0
+    val names = remember(peers) { peers.associate { it.nodeId to it.name } }
+    val shown = remember(messages, searchOpen, query) {
+        if (searchOpen && query.isNotBlank()) messages.filter { it.kind == "TEXT" && it.text.contains(query.trim(), ignoreCase = true) } else messages
+    }
 
     val report: (SendResult) -> Unit = { r -> sendResultMessage(r)?.let(onMessage) }
 
@@ -186,8 +201,16 @@ fun ChatScreen(vm: MainViewModel, peerId: String, onMessage: (String) -> Unit, m
     }
     // 60 s limit: send automatically, like WhatsApp.
     LaunchedEffect(recording, recElapsed) {
-        if (recording && recElapsed >= MediaLimits.MAX_VOICE_MS) {
+        if (recording && !pttClip && recElapsed >= MediaLimits.MAX_VOICE_MS) {
             vm.finishRecording(peerId, { onMessage("Recording too short") }, report)
+        }
+    }
+
+    // Push-to-talk clips are capped at 15 s.
+    LaunchedEffect(recording, recElapsed, pttClip) {
+        if (recording && pttClip && recElapsed >= MediaLimits.MAX_PTT_MS) {
+            pttClip = false
+            vm.finishRecording(peerId, { onMessage("Recording too short") }, report, ptt = true)
         }
     }
 
@@ -224,14 +247,41 @@ fun ChatScreen(vm: MainViewModel, peerId: String, onMessage: (String) -> Unit, m
 
     Column(modifier.fillMaxSize().imePadding()) {
         val info = when {
+            isGroup -> "Group • ${group?.members?.split(',')?.size ?: 0} members • end-to-end encrypted, sent to each member separately"
             peer?.reachable == true -> "${hopsText(peer.hops)} away • end-to-end encrypted"
             else -> "Not in range — messages, photos and voice are saved here and delivered automatically when this person is reachable"
         }
-        Text(info, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                info + if (disappearSec > 0) "\n⏱ New messages disappear after ${disappearLabel(disappearSec)}" else "",
+                Modifier.weight(1f).padding(vertical = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            IconButton(onClick = { searchOpen = !searchOpen; if (!searchOpen) query = "" }) { Text("🔍") }
+        }
+        if (searchOpen) {
+            OutlinedTextField(
+                value = query, onValueChange = { query = it }, singleLine = true, placeholder = { Text("Search in this chat") },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            )
+        }
 
         LazyColumn(Modifier.weight(1f), state = listState, contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(messages, key = { it.msgId }) { m ->
-                MessageRow(m, progress[m.msgId], player, vm, onOpenImage = { viewingImage = it }, onMessage = onMessage)
+            items(shown, key = { it.msgId }) { m ->
+                MessageRow(
+                    m, progress[m.msgId], player, vm, onOpenImage = { viewingImage = it }, onMessage = onMessage,
+                    isGroup = isGroup, senderName = if (m.outgoing) "You" else names[m.senderId.ifEmpty { m.peerId }] ?: NodeIds.display(m.senderId.ifEmpty { m.peerId }),
+                    onReply = { replyTo = m }, onDelete = { everyone -> vm.deleteMessage(peerId, m, everyone) },
+                )
+            }
+        }
+
+        replyTo?.let { r ->
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Replying to ${if (r.outgoing) "yourself" else names[r.senderId.ifEmpty { r.peerId }] ?: "message"}", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
+                    Text(r.preview(), maxLines = 1, style = MaterialTheme.typography.bodySmall)
+                }
+                TextButton(onClick = { replyTo = null }) { Text("✕") }
             }
         }
 
@@ -247,7 +297,7 @@ fun ChatScreen(vm: MainViewModel, peerId: String, onMessage: (String) -> Unit, m
                             attachMenu = false
                             imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                         })
-                        DropdownMenuItem(text = { Text("📍  Location") }, onClick = {
+                        if (!isGroup) DropdownMenuItem(text = { Text("📍  Location") }, onClick = {
                             attachMenu = false
                             locationDialog = true
                         })
@@ -262,11 +312,38 @@ fun ChatScreen(vm: MainViewModel, peerId: String, onMessage: (String) -> Unit, m
             if (text.isNotBlank() && !recording) {
                 IconButton(onClick = {
                     val t = text
-                    vm.sendPrivate(peerId, t) { r -> if (r == SendResult.OK) text = "" else report(r) }
+                    vm.sendPrivate(peerId, t, replyTo) { r -> if (r == SendResult.OK) { text = ""; replyTo = null } else report(r) }
                 }) { Icon(Icons.AutoMirrored.Filled.Send, "Send") }
             } else {
+                if (text.isBlank() && !recording) {
+                    MicHoldButton(
+                        recording = recording && pttClip,
+                        cancelThreshold = 90.dp,
+                        onStart = {
+                            when {
+                                ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED -> {
+                                    micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                                    false
+                                }
+                                vm.startRecording() -> { pttClip = true; cancelling = false; true }
+                                else -> { onMessage("Could not start the microphone"); false }
+                            }
+                        },
+                        onSlide = { _, c -> cancelling = c },
+                        onEnd = { cancelled ->
+                            cancelling = false
+                            if (vm.recActive.value && pttClip) {
+                                pttClip = false
+                                if (cancelled) vm.cancelRecording()
+                                else vm.finishRecording(peerId, { onMessage("Too short — hold 📻 while you speak") }, report, ptt = true)
+                            }
+                        },
+                        label = "📻",
+                    )
+                    Spacer(Modifier.padding(horizontal = 3.dp))
+                }
                 MicHoldButton(
-                    recording = recording,
+                    recording = recording && !pttClip,
                     cancelThreshold = 90.dp,
                     onStart = {
                         when {
@@ -336,6 +413,7 @@ fun ChatScreen(vm: MainViewModel, peerId: String, onMessage: (String) -> Unit, m
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageRow(
     m: MessageEntity,
@@ -344,11 +422,33 @@ private fun MessageRow(
     vm: MainViewModel,
     onOpenImage: (String) -> Unit,
     onMessage: (String) -> Unit,
+    isGroup: Boolean = false,
+    senderName: String = "",
+    onReply: () -> Unit = {},
+    onDelete: (Boolean) -> Unit = {},
 ) {
     val out = m.outgoing
     val bubble = if (out) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+    var menu by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (out) Arrangement.End else Arrangement.Start) {
-        Column(Modifier.widthIn(max = 300.dp).background(bubble, RoundedCornerShape(14.dp)).padding(8.dp)) {
+        Column(
+            Modifier.widthIn(max = 300.dp).background(bubble, RoundedCornerShape(14.dp))
+                .combinedClickable(onClick = {}, onLongClick = { menu = true }).padding(8.dp),
+        ) {
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(text = { Text("↩  Reply") }, onClick = { menu = false; onReply() })
+                if (m.kind == "TEXT") DropdownMenuItem(text = { Text("⧉  Copy") }, onClick = { menu = false; clipboard.setText(AnnotatedString(m.text)) })
+                DropdownMenuItem(text = { Text("🗑  Delete for me") }, onClick = { menu = false; onDelete(false) })
+                if (out) DropdownMenuItem(text = { Text("🗑  Delete for everyone") }, onClick = { menu = false; onDelete(true) })
+            }
+            if (isGroup && !out) Text(senderName, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+            if (m.replyToId.isNotEmpty()) {
+                Text(
+                    m.replyQuote.ifEmpty { "Message" }, maxLines = 2, style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f), RoundedCornerShape(8.dp)).padding(6.dp),
+                )
+            }
             when (m.kind) {
                 "IMAGE" -> ImageContent(m, onOpenImage)
                 "VOICE" -> VoiceBubbleContent(
@@ -366,7 +466,7 @@ private fun MessageRow(
                 else -> "  " + statusLabel(m.status)
             }
             Text(
-                timeText(m.timestamp) + status,
+                timeText(m.timestamp) + (if (m.expiresAt > 0) " ⏱" else "") + status,
                 Modifier.align(Alignment.End).padding(top = 2.dp, start = 4.dp, end = 4.dp),
                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
             )
@@ -426,4 +526,11 @@ private fun statusLabel(s: String) = when (s) {
     "DELIVERED" -> "✓✓ delivered"
     "FAILED" -> "✗ failed"
     else -> ""
+}
+
+fun disappearLabel(sec: Int) = when {
+    sec <= 0 -> "Off"
+    sec < 3600 -> "${sec / 60} minutes"
+    sec < 86400 -> "${sec / 3600} hours"
+    else -> "${sec / 86400} days"
 }

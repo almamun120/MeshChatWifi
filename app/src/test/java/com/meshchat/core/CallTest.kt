@@ -128,7 +128,7 @@ class CallManagerTest {
     }
 
     /** A phone: its CallManager, its fake links and every call it logged. */
-    inner class Phone(val id: String, linkMaker: () -> FakeLink, val gate: LinkGate = LinkGate(), var reachable: Boolean = true) {
+    inner class Phone(val id: String, linkMaker: () -> FakeLink, val gate: LinkGate = LinkGate(), var reachable: Boolean = true, val config: CallConfig = cfg) {
         val links = ConcurrentLinkedQueue<FakeLink>()
         val records = ConcurrentLinkedQueue<CallRecord>()
         @Volatile var dropNext = 0
@@ -149,7 +149,7 @@ class CallManagerTest {
             gate,
             { linkMaker().also { links.add(it) } },
             { records.add(it) },
-            cfg,
+            config,
         )
         val ui get() = manager.ui.value
     }
@@ -201,6 +201,54 @@ class CallManagerTest {
         assertTrue(ra.outgoing && !rb.outgoing)
         assertTrue("duration recorded", ra.durationMs >= 100 && rb.durationMs >= 50)
         assertTrue(a.gate.isFree() && b.gate.isFree())
+    }
+
+    @Test
+    fun livePushToTalkSessionStartsWithClosedMicsAndOpensOnDemand() = runBlocking {
+        val (a, b) = pair()
+        assertEquals(StartResult.OK, a.manager.startCall("B", ptt = true))
+        until(what = "B rings") { b.ui.phase == CallPhase.INCOMING }
+        assertTrue(b.ui.ptt)
+        b.manager.accept()
+        until(what = "both active") { a.ui.phase == CallPhase.ACTIVE && b.ui.phase == CallPhase.ACTIVE }
+        assertTrue(a.ui.ptt && a.ui.muted && b.ui.muted && a.ui.speaker)       // mics closed, loudspeaker on
+        assertTrue(a.links.single().mutedState && b.links.single().mutedState)
+        assertFalse(a.links.single().video)
+        a.manager.setMuted(false)                                              // A holds the talk button
+        assertFalse(a.links.single().mutedState)
+        assertTrue(b.links.single().mutedState)
+        a.manager.setMuted(true)                                               // released
+        assertTrue(a.links.single().mutedState)
+        a.manager.hangUp()
+        until(what = "ended") { b.ui.phase == CallPhase.ENDED }
+    }
+
+    @Test
+    fun receiverWithPushToTalkOffDeclinesSilently() = runBlocking {
+        val air = AtomicInteger()
+        val a = Phone("A", { FakeLink(air) })
+        val b = Phone("B", { FakeLink(air) }, config = cfg.copy(acceptPtt = { false }))
+        a.peers = mapOf("B" to b); b.peers = mapOf("A" to a)
+        phones = listOf(a, b)
+        a.manager.startCall("B", ptt = true)
+        until(what = "A sees declined") { a.ui.phase == CallPhase.ENDED }
+        assertEquals(CallEnd.DECLINED, a.ui.endReason)
+        assertEquals("B never rang", CallPhase.IDLE, b.ui.phase)
+        // a normal call to the same phone still rings
+        a.manager.startCall("B")
+        until(what = "B rings for a normal call") { b.ui.phase == CallPhase.INCOMING }
+    }
+
+    @Test
+    fun autoAnswerConnectsPushToTalkWithoutRinging() = runBlocking {
+        val air = AtomicInteger()
+        val a = Phone("A", { FakeLink(air) })
+        val b = Phone("B", { FakeLink(air) }, config = cfg.copy(autoAnswerPtt = { true }))
+        a.peers = mapOf("B" to b); b.peers = mapOf("A" to a)
+        phones = listOf(a, b)
+        a.manager.startCall("B", ptt = true)
+        until(what = "both active without anyone answering") { a.ui.phase == CallPhase.ACTIVE && b.ui.phase == CallPhase.ACTIVE }
+        assertTrue(b.ui.muted)
     }
 
     @Test

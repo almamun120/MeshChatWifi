@@ -19,9 +19,11 @@ object Notifier {
     const val CH_SERVICE = "mesh_service"
     const val CH_MESSAGES = "mesh_messages"
     const val CH_CALLS = "mesh_calls"
+    const val CH_SOS = "mesh_sos"
     private const val ID_CALL = 2
     const val ID_SERVICE = 1
     private const val ID_MESSAGE_BASE = 1000
+    private const val ID_SOS_BASE = 200000
 
     fun createChannels(ctx: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -38,6 +40,40 @@ object Notifier {
                 enableVibration(false)
             },
         )
+    }
+
+    fun createSosChannel(ctx: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        ctx.getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(CH_SOS, "SOS alerts", NotificationManager.IMPORTANCE_HIGH).apply {
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 600, 300, 600, 300, 600)
+                setBypassDnd(true)
+            },
+        )
+    }
+
+    /** Loud heads-up notification for someone's SOS; an "I'm safe" update replaces it quietly. */
+    fun notifySos(ctx: Context, nodeId: String, name: String, active: Boolean, detail: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) return
+        createSosChannel(ctx)
+        val open = openApp(ctx)
+        val b = NotificationCompat.Builder(ctx, CH_SOS)
+            .setSmallIcon(R.drawable.ic_stat_mesh)
+            .setContentTitle(if (active) "🆘 SOS from $name" else "✅ $name is safe")
+            .setContentText(detail)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(detail))
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setPriority(if (active) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_DEFAULT)
+            .setContentIntent(open)
+            .setAutoCancel(true)
+        if (active) b.setFullScreenIntent(open, true)
+        try {
+            NotificationManagerCompat.from(ctx).notify(ID_SOS_BASE + (nodeId.hashCode() and 0xFFFF), b.build())
+        } catch (_: SecurityException) {
+        }
     }
 
     private fun openApp(ctx: Context): PendingIntent =
@@ -84,7 +120,7 @@ object Notifier {
     }
 
     /** Heads-up / full-screen notification for an incoming call; tapping it opens the Answer / Decline screen. */
-    fun incomingCall(ctx: Context, name: String, video: Boolean) {
+    fun incomingCall(ctx: Context, name: String, video: Boolean, ptt: Boolean = false) {
         if (!com.meshchat.data.AppSettings.callNotifications.value) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -92,7 +128,7 @@ object Notifier {
         val open = openApp(ctx)
         val n = NotificationCompat.Builder(ctx, CH_CALLS)
             .setSmallIcon(R.drawable.ic_stat_mesh)
-            .setContentTitle("Incoming " + (if (video) "video call" else "call"))
+            .setContentTitle(if (ptt) "Walkie-talkie request" else "Incoming " + (if (video) "video call" else "call"))
             .setContentText(name)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_HIGH)

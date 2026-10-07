@@ -16,7 +16,8 @@ enum class PacketType(val code: Int, val channel: Channel) {
     SYNC_WANT(7, Channel.SYNC),
     MEDIA(8, Channel.MSG),          // one chunk of an encrypted image/voice blob (routed unicast)
     MEDIA_NACK(9, Channel.MSG),     // receiver asks the sender to resend missing chunks
-    CALL(10, Channel.MSG);          // encrypted session signalling (call / file-transfer offers, accept, Wi-Fi link info); never stored or queued
+    CALL(10, Channel.MSG),
+    SOS(11, Channel.MSG);          // signed emergency broadcast (flooded, never stored); repeated by the sender until "I'm safe"          // encrypted session signalling (call / file-transfer offers, accept, Wi-Fi link info); never stored or queued
 
     companion object {
         private val byCode = entries.associateBy { it.code }
@@ -182,7 +183,9 @@ data class RouteAd(val nodeId: String, val hops: Int)
 object Payloads {
 
     data class Hello(val name: String, val caps: Int, val routes: List<RouteAd>)
-    data class Identity(val caps: Int, val name: String, val publicKey: ByteArray)
+    data class Identity(val caps: Int, val name: String, val publicKey: ByteArray, val email: String = "")
+
+    const val MAX_EMAIL_BYTES = 64
     data class Announce(val authorName: String, val content: String)
 
     fun clampUtf8(s: String, maxBytes: Int): ByteArray {
@@ -254,10 +257,15 @@ object Payloads {
 
     fun encodeIdentity(i: Identity): ByteArray {
         val nameBytes = clampUtf8(i.name, Protocol.MAX_NAME_BYTES)
-        val b = ByteBuffer.allocate(1 + 1 + nameBytes.size + 1 + i.publicKey.size)
+        // Optional e-mail goes after the key. Without one the bytes are exactly the old format, so phones on older
+        // builds keep accepting this identity; only identities that carry an e-mail need the newer build.
+        val emailBytes = clampUtf8(i.email.trim(), MAX_EMAIL_BYTES)
+        val extra = if (emailBytes.isEmpty()) 0 else 1 + emailBytes.size
+        val b = ByteBuffer.allocate(1 + 1 + nameBytes.size + 1 + i.publicKey.size + extra)
         b.put(i.caps.toByte())
         b.put(nameBytes.size.toByte()).put(nameBytes)
         b.put(i.publicKey.size.toByte()).put(i.publicKey)
+        if (emailBytes.isNotEmpty()) b.put(emailBytes.size.toByte()).put(emailBytes)
         return b.array()
     }
 
@@ -268,9 +276,11 @@ object Payloads {
         val name = b.getShortStr() ?: return null
         if (!b.hasRemaining()) return null
         val kl = b.get().toInt() and 0xFF
-        if (kl == 0 || b.remaining() != kl) return null
+        if (kl == 0 || b.remaining() < kl) return null
         val key = ByteArray(kl).also { b.get(it) }
-        Identity(caps, name, key)
+        val email = if (b.hasRemaining()) (b.getShortStr() ?: return null) else ""
+        if (b.hasRemaining()) return null
+        Identity(caps, name, key, email)
         } catch (e: Exception) {
             null
         }

@@ -9,6 +9,7 @@ class NodeRecord(
     val lastSeen: Long,
     val blocked: Boolean = false,
     val muted: Boolean = false,
+    val email: String = "",
 )
 
 class PostRecord(
@@ -44,19 +45,34 @@ data class OutTransferInfo(
     val lastAttempt: Long,
 )
 
+/** A private group: membership is agreed by invite messages; every message is sent once per member. */
+data class GroupRecord(val id: String, val name: String, val creator: String, val members: List<String>, val createdAt: Long)
+
 /**
  * Persistence used by MeshEngine. Room implements it on Android; tests use an in-memory version.
  */
 interface MeshStore {
     suspend fun getNode(nodeId: String): NodeRecord?
     suspend fun upsertNodeName(nodeId: String, name: String, seen: Long)
-    suspend fun upsertNodeIdentity(nodeId: String, name: String, publicKey: ByteArray, seen: Long)
+    suspend fun upsertNodeIdentity(nodeId: String, name: String, publicKey: ByteArray, seen: Long, email: String = "")
     suspend fun setNodeFlags(nodeId: String, blocked: Boolean, muted: Boolean)
     suspend fun blockedIds(): Set<String>
     suspend fun mutedIds(): Set<String>
 
     /** Saves a private message (text, location, image or voice) in the local chat history. */
-    suspend fun saveMessage(peerId: String, msgIdHex: String, outgoing: Boolean, content: Content, timestamp: Long, status: MessageStatus)
+    suspend fun saveMessage(peerId: String, msgIdHex: String, outgoing: Boolean, content: Content, timestamp: Long, status: MessageStatus, senderId: String = "")
+
+    /** Removes a message from this phone only (and its media file). */
+    suspend fun deleteMessageLocal(msgIdHex: String)
+
+    /** "Delete for everyone" received from [senderId]: removes the message only if that person wrote it. */
+    suspend fun deleteMessageFrom(msgIdHex: String, senderId: String): Boolean
+
+    // private groups
+    suspend fun saveGroup(group: GroupRecord)
+    suspend fun getGroup(id: String): GroupRecord?
+    suspend fun allGroups(): List<GroupRecord>
+    suspend fun deleteGroup(id: String)
     suspend fun updateMessageStatus(msgIdHex: String, status: MessageStatus)
 
     /** QUEUED -> SENT only; never downgrades DELIVERED/FAILED (an ACK can overtake this call). */

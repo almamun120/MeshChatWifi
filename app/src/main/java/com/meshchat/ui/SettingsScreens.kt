@@ -21,7 +21,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -40,7 +46,7 @@ import androidx.compose.ui.unit.sp
 import com.meshchat.data.AppSettings
 
 @Composable
-fun SettingsScreen() {
+fun SettingsScreen(vm: MainViewModel) {
     val ctx = LocalContext.current
     val tree by AppSettings.downloadTree.collectAsState()
     val ringtone by AppSettings.ringtone.collectAsState()
@@ -49,6 +55,37 @@ fun SettingsScreen() {
     val xferN by AppSettings.transferNotifications.collectAsState()
     val vib by AppSettings.callVibrate.collectAsState()
     val use5 by AppSettings.use5Ghz.collectAsState()
+    val sosOn by AppSettings.sosAlerts.collectAsState()
+    val pttOn by AppSettings.pttEnabled.collectAsState()
+    val pttPlay by AppSettings.pttAutoPlay.collectAsState()
+    val pttAnswer by AppSettings.pttAutoAnswer.collectAsState()
+
+    var exportUri by remember { mutableStateOf<Uri?>(null) }
+    var exportPass by remember { mutableStateOf("") }
+    var exportMsg by remember { mutableStateOf<String?>(null) }
+    val exportPicker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { u ->
+        if (u != null) { exportUri = u; exportPass = ""; exportMsg = null }
+    }
+    exportUri?.let { uri ->
+        AlertDialog(
+            onDismissRequest = { exportUri = null },
+            title = { Text("Protect backup with a passphrase") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("You need this passphrase to restore. It cannot be recovered.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(
+                        value = exportPass, onValueChange = { exportPass = it }, singleLine = true, label = { Text("Passphrase (min 6)") },
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    )
+                    exportMsg?.let { Text(it) }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.exportBackup(uri, exportPass) { m -> exportMsg = m; if (m == "Backup saved") exportUri = null } }) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { exportUri = null }) { Text("Cancel") } },
+        )
+    }
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
@@ -105,6 +142,29 @@ fun SettingsScreen() {
                 if (ringtone != null) OutlinedButton(onClick = { AppSettings.setRingtone(null) }) { Text("Use default") }
             }
             SwitchRow("Vibrate on incoming call", vib, AppSettings::setCallVibrate)
+        }
+        Section("Push-to-talk") {
+            SwitchRow("Allow push-to-talk to me", pttOn, AppSettings::setPttEnabled)
+            Text("Off = short clips are dropped and live walkie-talkie requests are declined without ringing. Normal messages and calls are not affected.", style = MaterialTheme.typography.bodySmall)
+            if (pttOn) {
+                SwitchRow("Play incoming clips automatically (app open)", pttPlay, AppSettings::setPttAutoPlay)
+                SwitchRow("Connect live walkie-talkie without ringing", pttAnswer, AppSettings::setPttAutoAnswer)
+            }
+        }
+        Section("SOS") {
+            SwitchRow("Show alerts when someone sends an SOS", sosOn, AppSettings::setSosAlerts)
+            Text("Off = no alert or list entry on this phone. It still relays other people's SOS so the mesh keeps working.", style = MaterialTheme.typography.bodySmall)
+        }
+        Section("Identity backup") {
+            Text(
+                "Save your identity (Node ID, name, date of birth) as an encrypted JSON file. " +
+                    "After reinstalling, choose Restore from backup on the first screen to get the same Node ID back.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            OutlinedButton(onClick = { exportPicker.launch("meshchat-identity-backup.json") }, modifier = Modifier.fillMaxWidth()) {
+                Text("Export identity backup")
+            }
+            if (exportMsg == "Backup saved") Text("Backup saved")
         }
         Section("Notifications") {
             SwitchRow("New messages", msgN, AppSettings::setMessageNotifications)

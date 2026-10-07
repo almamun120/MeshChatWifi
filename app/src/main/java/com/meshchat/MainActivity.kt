@@ -14,6 +14,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -42,6 +43,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import com.meshchat.ui.ConfirmDialog
+import com.meshchat.ui.GroupInfoDialog
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -185,6 +187,7 @@ private fun MainScaffold(vm: MainViewModel, myNodeId: String, myName: String, re
     val tab by vm.tab.collectAsStateWithLifecycle()
     val status by vm.transport.collectAsStateWithLifecycle()
     val peers by vm.peers.collectAsStateWithLifecycle()
+    val chatPrefs by vm.chatPrefs.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val showMessage: (String) -> Unit = { m -> scope.launch { snackbar.showSnackbar(m) } }
@@ -195,6 +198,23 @@ private fun MainScaffold(vm: MainViewModel, myNodeId: String, myName: String, re
         when (confirm) {
             "clear" -> ConfirmDialog("Clear chat?", "All messages in this chat will be removed from this phone.", "Clear",
                 { vm.clearChat(cs.peerId, removeChat = false) }, { confirm = null })
+            "groupinfo" -> GroupInfoDialog(vm, cs.peerId, onDismiss = { confirm = null }, onGone = { confirm = null; vm.back() })
+            "leave" -> ConfirmDialog("Leave group?", "You will stop receiving messages and the group's messages are removed from this phone.", "Leave",
+                { vm.leaveGroup(cs.peerId); vm.back() }, { confirm = null })
+            "disappear" -> androidx.compose.material3.AlertDialog(
+                onDismissRequest = { confirm = null },
+                title = { Text("Disappearing messages") },
+                text = {
+                    Column {
+                        Text("Messages you send from now on delete themselves on both phones after this time (counted from sending / receiving).", style = MaterialTheme.typography.bodySmall)
+                        listOf(0 to "Off", 300 to "5 minutes", 3600 to "1 hour", 86400 to "1 day", 604800 to "7 days").forEach { (sec, label) ->
+                            TextButton(onClick = { vm.setDisappear(cs.peerId, sec); confirm = null }) { Text(label) }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } },
+            )
             "delete" -> ConfirmDialog("Delete chat?", "The chat and all its messages will be removed from this phone.", "Delete",
                 { vm.clearChat(cs.peerId, removeChat = true); vm.back() }, { confirm = null })
         }
@@ -223,6 +243,7 @@ private fun MainScaffold(vm: MainViewModel, myNodeId: String, myName: String, re
         Screen.ShareReceive -> "Receive"
         Screen.Settings -> "Settings"
         Screen.About -> "About the developer"
+        Screen.Sos -> "SOS alerts"
         is Screen.Chat -> {
             val name by remember(s.peerId) { vm.nodeName(s.peerId) }.collectAsStateWithLifecycle(initialValue = "")
             name.ifBlank { "Chat" }
@@ -245,11 +266,20 @@ private fun MainScaffold(vm: MainViewModel, myNodeId: String, myName: String, re
                 actions = {
                     val cs = screen
                     if (cs is Screen.Chat) {
-                        IconButton(onClick = { startCall(cs.peerId, true) }) { Text("📹") }
-                        IconButton(onClick = { startCall(cs.peerId, false) }) { Icon(Icons.Default.Call, "Call") }
+                        val isGroup = com.meshchat.core.GroupIds.isGroup(cs.peerId)
+                        val pref = chatPrefs[cs.peerId]
+                        if (!isGroup) {
+                            IconButton(onClick = { startCall(cs.peerId, true) }) { Text("📹") }
+                            IconButton(onClick = { startCall(cs.peerId, false) }) { Icon(Icons.Default.Call, "Call") }
+                        }
                         Box {
                             IconButton(onClick = { chatMenu = true }) { Text("⋮") }
                             DropdownMenu(expanded = chatMenu, onDismissRequest = { chatMenu = false }) {
+                                DropdownMenuItem(text = { Text(if (pref?.pinned == true) "Unpin chat" else "Pin chat") }, onClick = { chatMenu = false; vm.setPinned(cs.peerId, pref?.pinned != true) })
+                                DropdownMenuItem(text = { Text(if (pref?.muted == true) "Unmute notifications" else "Mute notifications") }, onClick = { chatMenu = false; vm.setChatMuted(cs.peerId, pref?.muted != true) })
+                                if (!isGroup) DropdownMenuItem(text = { Text("📻 Live walkie-talkie") }, onClick = { chatMenu = false; startCall.walkieTalkie(cs.peerId) })
+                                DropdownMenuItem(text = { Text("Disappearing messages…") }, onClick = { chatMenu = false; confirm = "disappear" })
+                                if (isGroup) DropdownMenuItem(text = { Text("Group info & settings") }, onClick = { chatMenu = false; confirm = "groupinfo" })
                                 DropdownMenuItem(text = { Text("Clear chat") }, onClick = { chatMenu = false; confirm = "clear" })
                                 DropdownMenuItem(text = { Text("Delete chat") }, onClick = { chatMenu = false; confirm = "delete" })
                             }
@@ -280,6 +310,14 @@ private fun MainScaffold(vm: MainViewModel, myNodeId: String, myName: String, re
     ) { padding ->
         val body = Modifier.padding(padding)
         Column(body.fillMaxSize()) {
+            val sosIn by vm.sosList.collectAsStateWithLifecycle()
+            val activeSos = sosIn.count { it.active }
+            if (activeSos > 0 && screen != Screen.Sos) {
+                Row(Modifier.fillMaxWidth().background(androidx.compose.ui.graphics.Color(0xFFC62828)).padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Text("🆘 $activeSos active SOS alert(s)", Modifier.weight(1f), color = androidx.compose.ui.graphics.Color.White)
+                    TextButton(onClick = { vm.open(Screen.Sos) }) { Text("View", color = androidx.compose.ui.graphics.Color.White) }
+                }
+            }
             if (btOff) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     Text("Bluetooth is off", Modifier.weight(1f), color = MaterialTheme.colorScheme.error)
@@ -300,7 +338,7 @@ private fun MainScaffold(vm: MainViewModel, myNodeId: String, myName: String, re
             }
             when (val s = screen) {
                 Screen.Tabs -> when (tab) {
-                    Tab.Home -> HomeScreen(vm, onOpenAnnounce = { vm.open(Screen.Announce) }, onSelectTab = vm::selectTab)
+                    Tab.Home -> HomeScreen(vm, onOpenAnnounce = { vm.open(Screen.Announce) }, onSelectTab = vm::selectTab, onOpenSos = { vm.open(Screen.Sos) })
                     Tab.Nearby -> NearbyScreen(vm) { vm.open(Screen.Chat(it)) }
                     Tab.Chats -> ChatsScreen(vm) { vm.open(Screen.Chat(it)) }
                     Tab.Share -> ShareHomeScreen(vm)
@@ -313,8 +351,9 @@ private fun MainScaffold(vm: MainViewModel, myNodeId: String, myName: String, re
                 Screen.SharePick -> SharePickScreen(vm, showMessage)
                 Screen.SharePeers -> SharePeersScreen(vm, showMessage)
                 Screen.ShareReceive -> ShareReceiveScreen(myName)
-                Screen.Settings -> SettingsScreen()
+                Screen.Settings -> SettingsScreen(vm)
                 Screen.About -> AboutScreen()
+                Screen.Sos -> com.meshchat.ui.SosScreen(vm, { vm.open(Screen.Chat(it)) }, showMessage)
             }
         }
     }

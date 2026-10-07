@@ -3,7 +3,9 @@ package com.meshchat.ui
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,7 +17,17 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.DisplayMode
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SelectableDates
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -36,6 +48,7 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun OnboardingScreen(vm: MainViewModel) {
     var name by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
     var dob by remember { mutableStateOf("") }
     var showDob by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -56,11 +69,12 @@ fun OnboardingScreen(vm: MainViewModel) {
             label = { Text("Your name") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
         )
         OutlinedTextField(
-            value = dob, onValueChange = { dob = it.take(10); error = null },
-            label = { Text("Date of birth (DD/MM/YYYY)") }, singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth(),
+            value = email, onValueChange = { email = it.take(60); error = null },
+            label = { Text("E-mail (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+            supportingText = { Text("If you enter it, people in range see it next to your name.") },
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Email),
         )
+        DobField(dob) { dob = it; error = null }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Show my date of birth on my Profile screen")
@@ -72,16 +86,95 @@ fun OnboardingScreen(vm: MainViewModel) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Privacy", style = MaterialTheme.typography.titleSmall)
                 Text("• Your date of birth and photo stay on this phone only.", style = MaterialTheme.typography.bodySmall)
-                Text("• Your name and a random Node ID are visible to MeshChat users in range.", style = MaterialTheme.typography.bodySmall)
+                Text("• Your name, a random Node ID and (only if you enter one) your e-mail are visible to MeshChat users in range.", style = MaterialTheme.typography.bodySmall)
                 Text("• Your location is never read or shared.", style = MaterialTheme.typography.bodySmall)
-                Text("• Reinstalling the app creates a new Node ID.", style = MaterialTheme.typography.bodySmall)
+                Text("• Reinstalling creates a new Node ID unless you restore an identity backup (Settings > Identity backup).", style = MaterialTheme.typography.bodySmall)
             }
         }
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         Button(
-            onClick = { vm.createProfile(name, dob, showDob) { error = it } },
+            onClick = { vm.createProfile(name, dob, showDob, email) { error = it } },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Create profile") }
+        RestoreBackupSection(vm)
+    }
+}
+
+/** "Restore from backup": pick the JSON file, type the passphrase, get the old Node ID back. */
+@Composable
+private fun RestoreBackupSection(vm: MainViewModel) {
+    var picked by remember { mutableStateOf<android.net.Uri?>(null) }
+    var pass by remember { mutableStateOf("") }
+    var err by remember { mutableStateOf<String?>(null) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u -> if (u != null) { picked = u; pass = ""; err = null } }
+    OutlinedButton(onClick = { picker.launch(arrayOf("application/json", "text/plain", "*/*")) }, modifier = Modifier.fillMaxWidth()) {
+        Text("Restore from backup (get my old Node ID)")
+    }
+    picked?.let { uri ->
+        AlertDialog(
+            onDismissRequest = { picked = null },
+            title = { Text("Enter backup passphrase") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = pass, onValueChange = { pass = it; err = null }, singleLine = true, label = { Text("Passphrase") },
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    )
+                    err?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
+            },
+            confirmButton = { TextButton(onClick = { vm.importBackup(uri, pass) { e -> if (e == null) picked = null else err = e } }) { Text("Restore") } },
+            dismissButton = { TextButton(onClick = { picked = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** Date of birth chosen from a calendar (the keyboard entry mode is still one tap away inside the dialog). */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DobField(value: String, onPicked: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val utc = java.time.ZoneOffset.UTC
+    val todayUtc = remember { java.time.LocalDate.now().atStartOfDay(utc).toInstant().toEpochMilli() }
+    Box(Modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = value, onValueChange = {}, readOnly = true, singleLine = true,
+            label = { Text("Date of birth") },
+            placeholder = { Text("Tap to choose") },
+            trailingIcon = { Text("📅", Modifier.padding(end = 12.dp)) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        // The text field swallows taps, so a transparent layer on top opens the calendar.
+        Box(Modifier.matchParentSize().clickable { open = true })
+    }
+    if (open) {
+        val initial = MainViewModel.parseDob(value)?.atStartOfDay(utc)?.toInstant()?.toEpochMilli()
+        val state = rememberDatePickerState(
+            initialSelectedDateMillis = initial,
+            initialDisplayedMonthMillis = initial ?: java.time.LocalDate.of(2000, 1, 1).atStartOfDay(utc).toInstant().toEpochMilli(),
+            yearRange = 1900..java.time.LocalDate.now().year,
+            initialDisplayMode = DisplayMode.Picker,
+            selectableDates = object : SelectableDates {
+                override fun isSelectableDate(utcTimeMillis: Long) = utcTimeMillis <= todayUtc
+                override fun isSelectableYear(year: Int) = year in 1900..java.time.LocalDate.now().year
+            },
+        )
+        DatePickerDialog(
+            onDismissRequest = { open = false },
+            confirmButton = {
+                TextButton(
+                    enabled = state.selectedDateMillis != null,
+                    onClick = {
+                        state.selectedDateMillis?.let { ms ->
+                            val d = java.time.Instant.ofEpochMilli(ms).atZone(utc).toLocalDate()
+                            onPicked(d.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy")))
+                        }
+                        open = false
+                    },
+                ) { Text("OK") }
+            },
+            dismissButton = { TextButton(onClick = { open = false }) { Text("Cancel") } },
+        ) { DatePicker(state = state) }
     }
 }
 

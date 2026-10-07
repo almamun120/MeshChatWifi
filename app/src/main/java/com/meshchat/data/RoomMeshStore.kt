@@ -2,6 +2,7 @@ package com.meshchat.data
 
 import androidx.room.withTransaction
 import com.meshchat.core.Content
+import com.meshchat.core.GroupRecord
 import com.meshchat.core.MeshStore
 import com.meshchat.core.MessageStatus
 import com.meshchat.core.NodeRecord
@@ -21,18 +22,19 @@ class RoomMeshStore(private val db: MeshDatabase, private val mediaDir: File) : 
     private val posts = db.postDao()
     private val pending = db.pendingDao()
     private val mediaOut = db.mediaOutDao()
+    private val groups = db.groupDao()
 
     override suspend fun getNode(nodeId: String): NodeRecord? =
-        nodes.get(nodeId)?.let { NodeRecord(it.nodeId, it.name, it.publicKey, it.lastSeen, it.blocked, it.muted) }
+        nodes.get(nodeId)?.let { NodeRecord(it.nodeId, it.name, it.publicKey, it.lastSeen, it.blocked, it.muted, it.email) }
 
     override suspend fun upsertNodeName(nodeId: String, name: String, seen: Long) {
         val old = nodes.get(nodeId)
-        nodes.upsert(NodeEntity(nodeId, name, old?.publicKey, seen, old?.blocked ?: false, old?.muted ?: false))
+        nodes.upsert(NodeEntity(nodeId, name, old?.publicKey, seen, old?.blocked ?: false, old?.muted ?: false, old?.email ?: ""))
     }
 
-    override suspend fun upsertNodeIdentity(nodeId: String, name: String, publicKey: ByteArray, seen: Long) {
+    override suspend fun upsertNodeIdentity(nodeId: String, name: String, publicKey: ByteArray, seen: Long, email: String) {
         val old = nodes.get(nodeId)
-        nodes.upsert(NodeEntity(nodeId, name, publicKey, seen, old?.blocked ?: false, old?.muted ?: false))
+        nodes.upsert(NodeEntity(nodeId, name, publicKey, seen, old?.blocked ?: false, old?.muted ?: false, email))
     }
 
     override suspend fun setNodeFlags(nodeId: String, blocked: Boolean, muted: Boolean) {
@@ -44,7 +46,7 @@ class RoomMeshStore(private val db: MeshDatabase, private val mediaDir: File) : 
     override suspend fun mutedIds(): Set<String> = nodes.mutedIds().toSet()
 
     override suspend fun saveMessage(
-        peerId: String, msgIdHex: String, outgoing: Boolean, content: Content, timestamp: Long, status: MessageStatus,
+        peerId: String, msgIdHex: String, outgoing: Boolean, content: Content, timestamp: Long, status: MessageStatus, senderId: String,
     ) {
         var path: String? = null
         val bytes = content.data
@@ -63,6 +65,9 @@ class RoomMeshStore(private val db: MeshDatabase, private val mediaDir: File) : 
                     status = status.name, kind = content.kind.name, mediaPath = path, durationMs = content.durationMs,
                     lat = content.lat, lon = content.lon, accuracyM = content.accuracyM,
                     waveform = content.waveform, codec = content.codec,
+                    senderId = senderId, replyToId = content.replyToId, replyQuote = content.replyQuote,
+                    expiresAt = if (content.ttlSec > 0) timestamp + content.ttlSec * 1000L else 0L,
+                    ptt = content.ptt,
                 ),
             )
             if (inserted != -1L) {
@@ -72,6 +77,57 @@ class RoomMeshStore(private val db: MeshDatabase, private val mediaDir: File) : 
             }
         }
     }
+
+    override suspend fun deleteMessageLocal(msgIdHex: String) {
+        val m = messages.get(msgIdHex) ?: return
+        removeMessage(m)
+    }
+
+    override suspend fun deleteMessageFrom(msgIdHex: String, senderId: String): Boolean {
+        val m = messages.get(msgIdHex) ?: return false
+        if (m.outgoing || m.senderId.ifEmpty { m.peerId } != senderId) return false
+        removeMessage(m)
+        return true
+    }
+
+    private suspend fun removeMessage(m: MessageEntity) {
+        m.mediaPath?.let { p -> withContext(Dispatchers.IO) { runCatching { File(p).delete() } } }
+        db.withTransaction {
+            messages.delete(m.msgId)
+            refreshChat(m.peerId)
+        }
+    }
+
+    /** Keeps the chat-list preview in step after messages were deleted or expired. */
+    private suspend fun refreshChat(peerId: String) {
+        val chat = chats.get(peerId) ?: return
+        val last = messages.last(peerId)
+        chats.upsert(
+            if (last == null) chat.copy(lastMessage = "", unread = 0)
+            else chat.copy(lastMessage = last.preview(), lastTimestamp = last.timestamp),
+        )
+    }
+
+    /** Deletes disappearing messages whose time is up (media files too). Called every few seconds and from purgeExpired. */
+    suspend fun purgeExpiredMessages(now: Long) {
+        val gone = messages.expired(now)
+        if (gone.isEmpty()) return
+        gone.forEach { m -> m.mediaPath?.let { p -> withContext(Dispatchers.IO) { runCatching { File(p).delete() } } } }
+        db.withTransaction {
+            gone.forEach { messages.delete(it.msgId) }
+            gone.map { it.peerId }.distinct().forEach { refreshChat(it) }
+        }
+    }
+
+    override suspend fun saveGroup(group: GroupRecord) {
+        groups.upsert(GroupEntity(group.id, group.name, group.creator, group.members.joinToString(","), group.createdAt))
+        if (chats.get(group.id) == null) chats.upsert(ChatEntity(group.id, "Group created", group.createdAt, 0))
+    }
+
+    private fun GroupEntity.toRecord() = GroupRecord(id, name, creator, members.split(',').filter { it.isNotEmpty() }, createdAt)
+    override suspend fun getGroup(id: String): GroupRecord? = groups.get(id)?.toRecord()
+    override suspend fun allGroups(): List<GroupRecord> = groups.all().map { it.toRecord() }
+    override suspend fun deleteGroup(id: String) = groups.delete(id)
 
     override suspend fun updateMessageStatus(msgIdHex: String, status: MessageStatus) {
         messages.setStatus(msgIdHex, status.name)
@@ -124,6 +180,7 @@ class RoomMeshStore(private val db: MeshDatabase, private val mediaDir: File) : 
     override suspend fun deleteOutTransfer(idHex: String) = mediaOut.delete(idHex)
 
     override suspend fun purgeExpired(now: Long) {
+        purgeExpiredMessages(now)
         pending.deleteExpired(now)
         mediaOut.deleteExpired(now)
         posts.deleteOlderThan(now - POST_RETENTION_MS)

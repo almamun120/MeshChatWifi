@@ -49,6 +49,7 @@ sealed interface Screen {
     data object ShareReceive : Screen
     data object Settings : Screen
     data object About : Screen
+    data object Sos : Screen
 }
 
 enum class Tab { Home, Nearby, Chats, Share, Me }
@@ -100,6 +101,7 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private fun applyUiState() {
         val s = _screen.value
+        repo.openSosScreen = _screen.value == Screen.Sos
         repo.setUiState(visible, (s as? Screen.Chat)?.peerId ?: if (s is Screen.Announce) "announce" else null)
     }
 
@@ -120,7 +122,7 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
 
     // ---- calls
     val callUi: StateFlow<CallUi> = repo.callUi.state(CallUi())
-    fun startCall(peerId: String, video: Boolean): StartResult = repo.startCall(peerId, video)
+    fun startCall(peerId: String, video: Boolean, ptt: Boolean = false): StartResult = repo.startCall(peerId, video, ptt)
     fun acceptCall() = repo.acceptCall()
     fun rejectCall() = repo.rejectCall()
     fun hangUp() = repo.hangUp()
@@ -156,13 +158,44 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     fun nodeName(peerId: String): Flow<String> = repo.nodeName(peerId)
 
     // ---- actions
-    fun createProfile(name: String, dobText: String, showDob: Boolean, onError: (String) -> Unit) {
+    fun createProfile(name: String, dobText: String, showDob: Boolean, email: String, onError: (String) -> Unit) {
         val n = name.trim()
+        if (!com.meshchat.core.ProfileRules.isValidEmail(email)) return onError("That e-mail address does not look right (leave it empty if you prefer)")
         if (n.isEmpty()) return onError("Please enter your name")
         if (n.length > 24) return onError("Name is too long (max 24 characters)")
-        val dob = parseDob(dobText) ?: return onError("Enter date of birth as DD/MM/YYYY")
-        viewModelScope.launch { repo.createProfile(n, dob.toEpochDay(), showDob) }
+        val dob = parseDob(dobText) ?: return onError("Please choose your date of birth")
+        viewModelScope.launch { repo.createProfile(n, dob.toEpochDay(), showDob, email) }
     }
+
+    /** Exports to [uri]; result message through [done]. */
+    fun exportBackup(uri: android.net.Uri, passphrase: String, done: (String) -> Unit) {
+        if (passphrase.length < com.meshchat.core.IdentityBackup.MIN_PASSPHRASE) return done("Passphrase must be at least ${com.meshchat.core.IdentityBackup.MIN_PASSPHRASE} characters")
+        viewModelScope.launch {
+            val json = repo.exportBackup(passphrase.toCharArray())
+            done(if (json != null && repo.writeUriText(uri, json)) "Backup saved" else "Could not save backup")
+        }
+    }
+
+    fun importBackup(uri: android.net.Uri, passphrase: String, done: (String?) -> Unit) {
+        viewModelScope.launch {
+            val json = repo.readUriText(uri) ?: return@launch done("Could not read the file")
+            done(
+                when (repo.importBackup(json, passphrase.toCharArray())) {
+                    null -> null
+                    com.meshchat.core.RestoreError.WRONG_PASSPHRASE -> "Wrong passphrase"
+                    com.meshchat.core.RestoreError.BAD_FILE -> "This is not a MeshChat backup"
+                    else -> "Backup is damaged"
+                },
+            )
+        }
+    }
+
+    val sosList: StateFlow<List<com.meshchat.data.SosEntity>> = repo.sosList.state(emptyList())
+    val sosActive: StateFlow<Boolean> = repo.sosActive.state(false)
+    fun startSos(includeLocation: Boolean): Boolean = repo.startSos(includeLocation)
+    fun stopSos() = repo.stopSos()
+    fun markSosSeen() { viewModelScope.launch { repo.markSosSeen() } }
+    fun clearSos() { viewModelScope.launch { repo.clearSos() } }
 
     fun setShowDob(v: Boolean) {
         viewModelScope.launch { repo.setShowDob(v) }
@@ -176,9 +209,36 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { onResult(repo.sendAnnounce(text)) }
     }
 
-    fun sendPrivate(peerId: String, text: String, onResult: (SendResult) -> Unit) {
-        viewModelScope.launch { onResult(repo.sendPrivate(peerId, text)) }
+    fun sendPrivate(peerId: String, text: String, reply: MessageEntity? = null, onResult: (SendResult) -> Unit) {
+        viewModelScope.launch { onResult(repo.sendPrivate(peerId, text, reply)) }
     }
+
+    init {
+        viewModelScope.launch { repo.pttPlay.collect { m -> m.mediaPath?.let { player.toggle(m.msgId, it, m.durationMs) } } }
+    }
+
+    val chatPrefs: StateFlow<Map<String, com.meshchat.data.ChatPrefEntity>> = repo.chatPrefs.state(emptyMap())
+    fun group(id: String): Flow<com.meshchat.data.GroupEntity?> = repo.group(id)
+    fun setPinned(peerId: String, v: Boolean) { viewModelScope.launch { repo.setPinned(peerId, v) } }
+    fun setChatMuted(peerId: String, v: Boolean) { viewModelScope.launch { repo.setChatMuted(peerId, v) } }
+    fun setDisappear(peerId: String, sec: Int) { viewModelScope.launch { repo.setDisappear(peerId, sec) } }
+    fun deleteMessage(peerId: String, m: MessageEntity, forEveryone: Boolean) { viewModelScope.launch { repo.deleteMessage(peerId, m, forEveryone) } }
+    fun search(q: String, peerId: String?, onResult: (List<MessageEntity>) -> Unit) { viewModelScope.launch { onResult(repo.search(q, peerId)) } }
+    fun createGroup(name: String, members: List<String>, onDone: (String?) -> Unit) { viewModelScope.launch { onDone(repo.createGroup(name, members)) } }
+    /** Changes the optional e-mail; [onResult] gets an error text or null. */
+    fun setEmail(email: String, onResult: (String?) -> Unit) {
+        if (!com.meshchat.core.ProfileRules.isValidEmail(email)) return onResult("That e-mail address does not look right")
+        viewModelScope.launch { repo.setEmail(email); onResult(null) }
+    }
+
+    /** Group creator: rename and/or change members ([others] = everyone except me). */
+    fun updateGroup(id: String, name: String?, others: List<String>?, onDone: (Boolean) -> Unit) {
+        viewModelScope.launch { onDone(repo.updateGroup(id, name, others)) }
+    }
+
+    fun forgetPeer(nodeId: String) { viewModelScope.launch { repo.forgetPeer(nodeId) } }
+
+    fun leaveGroup(id: String) { viewModelScope.launch { repo.leaveGroup(id) } }
 
     fun sendImage(peerId: String, uri: Uri, onResult: (SendResult) -> Unit) {
         viewModelScope.launch { onResult(repo.sendImage(peerId, uri)) }
@@ -192,13 +252,13 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     fun cancelRecording() = recorder.cancel()
 
     /** Stops recording and sends the voice note. [onTooShort] is called if nothing usable was recorded. */
-    fun finishRecording(peerId: String, onTooShort: () -> Unit, onResult: (SendResult) -> Unit) {
+    fun finishRecording(peerId: String, onTooShort: () -> Unit, onResult: (SendResult) -> Unit, ptt: Boolean = false) {
         val rec: RecordedVoice? = recorder.stop()
         if (rec == null) {
             onTooShort()
             return
         }
-        viewModelScope.launch { onResult(repo.sendVoice(peerId, rec)) }
+        viewModelScope.launch { onResult(repo.sendVoice(peerId, rec, ptt)) }
     }
 
     /**

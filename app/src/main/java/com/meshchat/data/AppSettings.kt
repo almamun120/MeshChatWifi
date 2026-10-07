@@ -42,6 +42,33 @@ object AppSettings {
     val use5Ghz: StateFlow<Boolean> = _use5Ghz.asStateFlow()
     fun setUse5Ghz(v: Boolean) { _use5Ghz.value = v; prefs.edit().putBoolean("wifi_5ghz", v).apply() }
 
+    private val _sosAlerts = MutableStateFlow(true)
+    /** Show alerts for SOS broadcasts from other people. Off = this phone still relays them but stays quiet. */
+    val sosAlerts: StateFlow<Boolean> = _sosAlerts.asStateFlow()
+    fun setSosAlerts(v: Boolean) { _sosAlerts.value = v; prefs.edit().putBoolean("sos_alerts", v).apply() }
+
+    private val _sosActive = MutableStateFlow(false)
+    /** My own SOS is running (survives an app restart so the beacon resumes). */
+    val sosActive: StateFlow<Boolean> = _sosActive.asStateFlow()
+    fun setSosActive(v: Boolean) { _sosActive.value = v; prefs.edit().putBoolean("sos_active", v).apply() }
+
+    @Volatile var sosIncludeLocation: Boolean = false
+        private set
+    fun setSosIncludeLocation(v: Boolean) { sosIncludeLocation = v; prefs.edit().putBoolean("sos_include_location", v).apply() }
+
+    private val _pttEnabled = MutableStateFlow(true)
+    /** Master switch for receiving push-to-talk (short clips and live sessions). Off = declined silently. */
+    val pttEnabled: StateFlow<Boolean> = _pttEnabled.asStateFlow()
+    fun setPttEnabled(v: Boolean) { _pttEnabled.value = v; prefs.edit().putBoolean("ptt_enabled", v).apply() }
+    private val _pttAutoPlay = MutableStateFlow(true)
+    /** Play incoming push-to-talk clips by themselves while the app is open. */
+    val pttAutoPlay: StateFlow<Boolean> = _pttAutoPlay.asStateFlow()
+    fun setPttAutoPlay(v: Boolean) { _pttAutoPlay.value = v; prefs.edit().putBoolean("ptt_autoplay", v).apply() }
+    private val _pttAutoAnswer = MutableStateFlow(false)
+    /** Connect incoming live push-to-talk sessions without ringing (microphones stay closed until a button is held). */
+    val pttAutoAnswer: StateFlow<Boolean> = _pttAutoAnswer.asStateFlow()
+    fun setPttAutoAnswer(v: Boolean) { _pttAutoAnswer.value = v; prefs.edit().putBoolean("ptt_autoanswer", v).apply() }
+
     fun init(ctx: Context) {
         prefs = ctx.applicationContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
         _downloadTree.value = prefs.getString("download_tree", null)
@@ -52,6 +79,12 @@ object AppSettings {
         _callVibrate.value = prefs.getBoolean("call_vibrate", true)
         _use5Ghz.value = prefs.getBoolean("wifi_5ghz", false)
         announceClearedAt = prefs.getLong("announce_cleared_at", 0L)
+        _sosAlerts.value = prefs.getBoolean("sos_alerts", true)
+        _pttEnabled.value = prefs.getBoolean("ptt_enabled", true)
+        _pttAutoPlay.value = prefs.getBoolean("ptt_autoplay", true)
+        _pttAutoAnswer.value = prefs.getBoolean("ptt_autoanswer", false)
+        _sosActive.value = prefs.getBoolean("sos_active", false)
+        sosIncludeLocation = prefs.getBoolean("sos_include_location", false)
     }
 
     fun setDownloadTree(uri: Uri?) {

@@ -45,6 +45,8 @@ data class CallUi(
     val remoteCameraOn: Boolean = true,
     val poorConnection: Boolean = false,
     val endReason: CallEnd = CallEnd.NONE,
+    /** Live push-to-talk session (hold a button to talk) instead of a normal call. */
+    val ptt: Boolean = false,
 ) {
     val inCall: Boolean get() = phase != CallPhase.IDLE && phase != CallPhase.ENDED
 }
@@ -72,6 +74,10 @@ data class CallConfig(
     val monitorMs: Long = 500,
     /** Callee joins the caller's Wi-Fi Direct group while the phone is still ringing, so Answer connects in a second or two. */
     val prejoin: Boolean = false,
+    /** Receiver switch: false = live push-to-talk invitations are declined silently (no ring, no notification). */
+    val acceptPtt: () -> Boolean = { true },
+    /** Receiver option: connect incoming live push-to-talk sessions without ringing (the microphones still start muted). */
+    val autoAnswerPtt: () -> Boolean = { false },
 )
 
 /** How the managers talk to the mesh. MeshRepository adapts MeshEngine to this. */
@@ -131,7 +137,7 @@ class CallManager(
     private val config: CallConfig = CallConfig(),
     private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
-    private class Session(val callId: ByteArray, val peerId: String, val outgoing: Boolean, val video: Boolean, val startedAt: Long) {
+    private class Session(val callId: ByteArray, val peerId: String, val outgoing: Boolean, val video: Boolean, val startedAt: Long, val ptt: Boolean = false) {
         val idHex = Hex.encode(callId)
         var phase = CallPhase.IDLE
         var params: LinkParams? = null
@@ -148,14 +154,14 @@ class CallManager(
 
     // ------------------------------------------------------------------ user actions
 
-    fun startCall(peerId: String, video: Boolean = false): StartResult {
+    fun startCall(peerId: String, video: Boolean = false, ptt: Boolean = false): StartResult {
         if (!signaler.isReachable(peerId)) return StartResult.UNREACHABLE
         val s: Session
         synchronized(lock) {
             if (cur != null) return StartResult.BUSY
             val id = AudioPacketIds.newId()
             if (!gate.tryAcquire(Hex.encode(id))) return StartResult.BUSY
-            s = Session(id, peerId, true, video, clock())
+            s = Session(id, peerId, true, video && !ptt, clock(), ptt)
             s.linkImpl = newLink(s)
             s.phase = CallPhase.CALLING
             cur = s
@@ -275,9 +281,11 @@ class CallManager(
             val mine = s != null && s.idHex == sig.callIdHex && s.peerId == peerId
             when (sig.type) {
                 CallSignalType.INVITE -> {
-                    if (s == null) {
+                    if (s == null && sig.ptt && !config.acceptPtt()) {
+                        reply = CallSignal(CallSignalType.REJECT, sig.callId, sig.kind)       // receiver switched push-to-talk off
+                    } else if (s == null) {
                         if (gate.tryAcquire(sig.callIdHex)) {
-                            val n = Session(sig.callId, peerId, false, sig.video, clock())
+                            val n = Session(sig.callId, peerId, false, sig.video, clock(), sig.ptt)
                             n.phase = CallPhase.INCOMING
                             cur = n
                             publish(n)
@@ -319,7 +327,10 @@ class CallManager(
         }
 
         reply?.let { r -> scope.launch { signaler.send(peerId, r) } }
-        toStart?.let { s -> s.jobs += scope.launch { incomingLoop(s) } }
+        toStart?.let { s ->
+            s.jobs += scope.launch { incomingLoop(s) }
+            if (s.ptt && config.autoAnswerPtt()) accept()
+        }
         prejoinNow?.let { startPrejoin(it) }
         connectHost?.let { s ->
             s.jobs += scope.launch {
@@ -465,7 +476,7 @@ class CallManager(
             s.phase = CallPhase.ENDED
             _ui.value = CallUi(
                 phase = CallPhase.ENDED, peerId = s.peerId, callIdHex = s.idHex, outgoing = s.outgoing, video = s.video,
-                connectedAtMs = s.connectedAt, endReason = reason,
+                connectedAtMs = s.connectedAt, endReason = reason, ptt = s.ptt,
             )
         }
         s.jobs.forEach { it.cancel() }
@@ -490,7 +501,7 @@ class CallManager(
 
     // ------------------------------------------------------------------ helpers
 
-    private fun kindOf(s: Session) = if (s.video) SessionKind.VIDEO else SessionKind.AUDIO
+    private fun kindOf(s: Session) = if (s.ptt) SessionKind.PTT else if (s.video) SessionKind.VIDEO else SessionKind.AUDIO
 
     private fun newLink(s: Session): CallLink = linkFactory().also { l ->
         l.setListener(object : CallLinkListener {
@@ -508,8 +519,9 @@ class CallManager(
         _ui.value = CallUi(
             phase = s.phase, peerId = s.peerId, callIdHex = s.idHex, outgoing = s.outgoing, video = s.video,
             connectedAtMs = s.connectedAt,
-            muted = if (sameCall) old.muted else false,
-            speaker = if (sameCall) old.speaker else s.video,        // video calls start on the loudspeaker
+            muted = if (sameCall) old.muted else s.ptt,                // push-to-talk: mic closed until the button is held
+            speaker = if (sameCall) old.speaker else (s.video || s.ptt),   // video calls and walkie-talkie start on the loudspeaker
+            ptt = s.ptt,
             cameraOn = if (sameCall) old.cameraOn else s.video,
             remoteCameraOn = if (sameCall) old.remoteCameraOn else true,
             poorConnection = if (sameCall) old.poorConnection else false,

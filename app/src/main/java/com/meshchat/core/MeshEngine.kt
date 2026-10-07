@@ -80,14 +80,18 @@ data class MeshStats(
 
 sealed interface MeshEvent {
     /** [preview] is a short description ("Hello", "📷 Photo", "🎤 Voice message (0:12)") for notifications. */
-    data class PrivateReceived(val peerId: String, val preview: String) : MeshEvent
+    data class PrivateReceived(val peerId: String, val preview: String, val msgIdHex: String = "", val ptt: Boolean = false) : MeshEvent
     data class PostReceived(val authorName: String, val content: String) : MeshEvent
     data class Delivered(val msgIdHex: String) : MeshEvent
     /** A decrypted, authenticated session signal (call or file-transfer offer, accept, hang up, ...) from [peerId]. */
     class CallSignalReceived(val peerId: String, val signal: CallSignal) : MeshEvent
+    /** An SOS (or an "I'm safe" for an earlier one) from [alert].nodeId. Relaying happens regardless; the app decides whether to alert the user. */
+    class SosReceived(val alert: SosAlert) : MeshEvent
+    /** A group was deleted by its creator, or we were removed from it: the UI must drop the chat. */
+    class GroupGone(val groupId: String, val name: String, val deleted: Boolean) : MeshEvent
 }
 
-enum class SendResult { OK, EMPTY, TOO_LONG, NO_KEY, SELF, NOT_RUNNING, QUEUE_FULL, BAD_MEDIA }
+enum class SendResult { OK, EMPTY, TOO_LONG, NO_KEY, SELF, NOT_RUNNING, QUEUE_FULL, BAD_MEDIA, NO_GROUP }
 
 /**
  * The mesh brain. Pure Kotlin + coroutines (no Android classes), so it is unit-testable on the JVM.
@@ -104,6 +108,10 @@ class MeshEngine(
     private val scope: CoroutineScope,
     private val config: MeshConfig = MeshConfig(),
     private val clock: () -> Long = { System.currentTimeMillis() },
+    /** Receiver switch for push-to-talk clips: false = they are acknowledged but dropped (nothing stored, no sound). */
+    private val pttAllowed: () -> Boolean = { true },
+    /** Optional e-mail shown to others next to the name (signed with the identity). */
+    private val emailProvider: () -> String = { "" },
 ) {
     val myId: String = identity.nodeId
 
@@ -210,6 +218,54 @@ class MeshEngine(
         return SendResult.OK
     }
 
+    /** Floods one signed SOS ([active] = false means "I'm safe"). Not stored: the caller repeats it (see [SosSession]). */
+    suspend fun sendSos(active: Boolean, battery: Int, location: SosLocation?): SendResult {
+        val pkt = newPacket(
+            PacketType.SOS, NodeIds.BROADCAST,
+            SosCodec.encode(SosPayload(active, battery, location, nameProvider())),
+            Protocol.MAX_HOPS, sign = true,
+        )
+        dup.checkAndAdd(pkt.key)
+        val bytes = pkt.encode()
+        val peers = transport.linkedPeers()
+        for (p in peers) scope.launch { transport.send(p, pkt.type.channel, bytes) }
+        _stats.update { it.copy(sent = it.sent + 1) }
+        MeshLog.log("SOS ${if (active) "sent" else "safe sent"} to ${peers.size} neighbour(s)")
+        return if (peers.isEmpty()) SendResult.NO_KEY else SendResult.OK      // NO_KEY here = nobody in range yet (the caller keeps repeating)
+    }
+
+    private val lastSos = HashMap<String, Pair<Long, Boolean>>()          // sender -> (time, active); event loop only
+
+    private suspend fun onSos(from: String, pkt: MeshPacket) {
+        val p = SosCodec.decode(pkt.payload)
+        val sig = pkt.signature
+        if (p == null || sig == null || !pkt.isBroadcast) {
+            drop("bad sos")
+            return
+        }
+        var verified = false
+        val key = store.getNode(pkt.src)?.publicKey
+        if (key != null) {
+            if (!CryptoService.verify(key, pkt.signedBytes(), sig)) {
+                drop("sos: bad signature")
+                return
+            }
+            verified = true
+        }
+        val now = clock()
+        val last = lastSos[pkt.src]
+        // One alert per sender per 10 s, but a change of state ("I'm safe") always goes through.
+        if (last != null && last.second == p.active && now - last.first < 10_000) {
+            drop("sos: rate limit")
+            return
+        }
+        lastSos[pkt.src] = now to p.active
+        val alert = SosAlert(pkt.src, p.name, p.active, p.battery, p.location, minOf(pkt.timestamp, now), pkt.hops + 1, verified)
+        _events.tryEmit(MeshEvent.SosReceived(alert))
+        _stats.update { it.copy(received = it.received + 1) }
+        forwardBroadcast(pkt, from)
+    }
+
     suspend fun sendPrivate(peerId: String, text: String): SendResult = sendContent(peerId, Content.ofText(text))
 
     /**
@@ -218,14 +274,24 @@ class MeshEngine(
      * automatically when a route to them appears — text/location through the pending table, image/voice through the
      * media outbox (the sender keeps the encrypted blob).
      */
-    suspend fun sendContent(peerId: String, content: Content): SendResult {
+    suspend fun sendContent(peerId: String, content: Content): SendResult =
+        if (GroupIds.isGroup(peerId)) sendGroupContent(peerId, content)
+        else sendInternal(peerId, content, save = !content.kind.isControl)
+
+    private fun normalized(content: Content): Content? =
+        if (content.kind == ContentKind.TEXT) {
+            val t = content.text.trim()
+            if (t.isEmpty() || t.length > Protocol.MAX_PRIVATE_CHARS) null else content.copyEnvelope().let { Content(ContentKind.TEXT, text = t, ttlSec = it.ttlSec, replyToId = it.replyToId, replyQuote = it.replyQuote, groupId = it.groupId, logicalId = it.logicalId) }
+        } else content
+
+    private suspend fun sendInternal(peerId: String, content: Content, save: Boolean): SendResult {
         if (peerId == myId) return SendResult.SELF
-        val c = if (content.kind == ContentKind.TEXT) {
+        if (content.kind == ContentKind.TEXT) {
             val t = content.text.trim()
             if (t.isEmpty()) return SendResult.EMPTY
             if (t.length > Protocol.MAX_PRIVATE_CHARS) return SendResult.TOO_LONG
-            Content.ofText(t)
-        } else content
+        }
+        val c = normalized(content)!!
         val peerKey = store.getNode(peerId)?.publicKey ?: return SendResult.NO_KEY
         val plain = ContentCodec.encode(c) ?: return SendResult.BAD_MEDIA
         val id = newMsgId()
@@ -237,16 +303,147 @@ class MeshEngine(
             if (blob.size > MediaLimits.MAX_BLOB) return SendResult.TOO_LONG
             if (store.allOutTransfers().size >= config.maxOutTransfers) return SendResult.QUEUE_FULL
             val total = (blob.size + MediaLimits.CHUNK - 1) / MediaLimits.CHUNK
-            store.saveMessage(peerId, idHex, true, c, now, MessageStatus.QUEUED)
+            if (save) store.saveMessage(peerId, idHex, true, c, now, MessageStatus.QUEUED, myId)
             store.addOutTransfer(OutTransferInfo(idHex, peerId, total, now, now + config.pendingTtlMs, 0, 0), blob)
         } else {
             val pkt = MeshPacket(PacketType.PRIVATE, 0, Protocol.MAX_HOPS, 0, id, myId, peerId, now, blob)
             dup.checkAndAdd(pkt.key)
-            store.saveMessage(peerId, idHex, true, c, now, MessageStatus.QUEUED)
+            if (save) store.saveMessage(peerId, idHex, true, c, now, MessageStatus.QUEUED, myId)
             store.addPending(PendingRecord(pkt.key, peerId, pkt.encode(), true, now, now + config.pendingTtlMs, 0, 0))
         }
         scope.launch { flushQueues() }
         return SendResult.OK
+    }
+
+    /** Sends to every other member of the group (one encrypted private packet each). */
+    private suspend fun sendGroupContent(gid: String, content: Content): SendResult {
+        val g = store.getGroup(gid) ?: return SendResult.NO_GROUP
+        if (myId !in g.members) return SendResult.NO_GROUP
+        if (content.kind == ContentKind.TEXT) {
+            val t = content.text.trim()
+            if (t.isEmpty()) return SendResult.EMPTY
+            if (t.length > Protocol.MAX_PRIVATE_CHARS) return SendResult.TOO_LONG
+        }
+        val logical = if (content.kind == ContentKind.DELETE) "" else Hex.encode(newMsgId())
+        val c0 = normalized(content)!!
+        val c = if (content.kind == ContentKind.DELETE) c0.copyEnvelope(groupId = gid, logicalId = Hex.encode(newMsgId()))
+        else c0.copyEnvelope(groupId = gid, logicalId = logical)
+        if (ContentCodec.encode(c) == null) return SendResult.BAD_MEDIA
+        var any = false
+        var firstError = SendResult.NO_KEY
+        for (m in g.members) {
+            if (m == myId) continue
+            val r = sendInternal(m, c, save = false)
+            if (r == SendResult.OK) any = true else firstError = r
+        }
+        if (!any) return firstError
+        if (!content.kind.isControl) {
+            store.saveMessage(gid, logical, true, c, clock(), MessageStatus.SENT, myId)
+        }
+        return SendResult.OK
+    }
+
+    /**
+     * Creates a private group and invites every member. Returns the new group id, or null when a member's key is
+     * unknown, the list is too long, or the name is empty.
+     */
+    suspend fun createGroup(name: String, others: List<String>): String? {
+        val n = name.trim().take(GroupLimits.MAX_NAME)
+        val members = (listOf(myId) + others.filter { it != myId }).distinct()
+        if (n.isEmpty() || members.size !in 2..GroupLimits.MAX_MEMBERS) return null
+        if (others.any { store.getNode(it)?.publicKey == null }) return null
+        val gid = Hex.encode(newMsgId())
+        store.saveGroup(GroupRecord(gid, n, myId, members, clock()))
+        val invite = Content.ofGroupInvite(gid, n, members)
+        for (m in members) if (m != myId) sendInternal(m, invite, save = false)
+        return gid
+    }
+
+    /**
+     * Creator only: renames the group and/or replaces its member list (add / remove people). Everyone who is or was a
+     * member gets the new state; a person missing from the new list learns that they were removed.
+     * [newOthers] = every member except me, or null to keep the members. Returns false if refused.
+     */
+    suspend fun updateGroup(gid: String, newName: String?, newOthers: List<String>?): Boolean {
+        val g = store.getGroup(gid) ?: return false
+        if (g.creator != myId || myId !in g.members) return false
+        val name = (newName ?: g.name).trim().take(GroupLimits.MAX_NAME)
+        val members = if (newOthers == null) g.members else (listOf(myId) + newOthers.filter { it != myId }).distinct()
+        if (name.isEmpty() || members.size !in 2..GroupLimits.MAX_MEMBERS) return false
+        val added = members.filter { it !in g.members }
+        if (added.any { store.getNode(it)?.publicKey == null }) return false
+        store.saveGroup(g.copy(name = name, members = members))
+        val update = Content.ofGroupInvite(gid, name, members)
+        for (m in (members + g.members).distinct()) if (m != myId) sendInternal(m, update, save = false)
+        return true
+    }
+
+    /** Leaves a group: tells the others, then forgets it. The creator leaving deletes the group for everybody. */
+    suspend fun leaveGroup(gid: String) {
+        val g = store.getGroup(gid) ?: return
+        val bye = Content.ofGroupLeave(gid)
+        for (m in g.members) if (m != myId) sendInternal(m, bye, save = false)
+        store.deleteGroup(gid)
+    }
+
+    /** Deletes a message on this phone; with [forEveryone] (own messages only) the other side(s) are told to delete it too. */
+    suspend fun deleteMessage(chatKey: String, msgIdHex: String, forEveryone: Boolean) {
+        store.deleteMessageLocal(msgIdHex)
+        if (forEveryone) sendContent(chatKey, Content.ofDelete(msgIdHex))
+    }
+
+    /**
+     * Applies a decrypted private content. Returns false when it cannot be accepted yet (a group message that arrives
+     * before its invitation), so the sender keeps retrying instead of getting a delivery ACK.
+     */
+    private suspend fun acceptContent(src: String, pktIdHex: String, c: Content, ts: Long): Boolean {
+        when (c.kind) {
+            ContentKind.DELETE -> {
+                store.deleteMessageFrom(c.targetId, src)
+                return true
+            }
+            ContentKind.GROUP_INVITE -> {
+                val old = store.getGroup(c.groupId)
+                if (src !in c.members) return true
+                if (old != null && old.creator != src) return true          // only the creator may change a group
+                if (myId !in c.members) {
+                    if (old != null) {                                       // the creator removed me
+                        store.deleteGroup(c.groupId)
+                        _events.tryEmit(MeshEvent.GroupGone(c.groupId, old.name, deleted = false))
+                    }
+                    return true
+                }
+                store.saveGroup(GroupRecord(c.groupId, c.text, old?.creator ?: src, c.members, old?.createdAt ?: ts))
+                if (old == null) _events.tryEmit(MeshEvent.PrivateReceived(c.groupId, "You were added to group ${c.text}"))
+                return true
+            }
+            ContentKind.GROUP_LEAVE -> {
+                val g = store.getGroup(c.groupId) ?: return true
+                if (src !in g.members) return true
+                if (src == g.creator) {                                       // the creator left = group deleted
+                    store.deleteGroup(g.id)
+                    _events.tryEmit(MeshEvent.GroupGone(g.id, g.name, deleted = true))
+                } else store.saveGroup(g.copy(members = g.members - src))
+                return true
+            }
+            else -> Unit
+        }
+        if (c.ptt && !pttAllowed()) return true            // push-to-talk switched off on this phone
+        var chat = src
+        var sender = src
+        var id = pktIdHex
+        var preview = c.preview()
+        if (c.groupId.isNotEmpty()) {
+            val g = store.getGroup(c.groupId) ?: return false
+            if (myId !in g.members || src !in g.members) return true
+            chat = c.groupId
+            id = c.logicalId.ifEmpty { pktIdHex }
+            preview = (store.getNode(src)?.name?.ifBlank { null } ?: NodeIds.display(src)) + ": " + preview
+        }
+        store.saveMessage(chat, id, false, c, ts, MessageStatus.RECEIVED, sender)
+        _stats.update { it.copy(received = it.received + 1) }
+        _events.tryEmit(MeshEvent.PrivateReceived(chat, preview, id, c.ptt))
+        return true
     }
 
     /** True when a route to [peerId] exists right now (a call or transfer needs a live path for its signalling). */
@@ -510,6 +707,7 @@ class MeshEngine(
             PacketType.MEDIA -> onMedia(from, pkt)
             PacketType.MEDIA_NACK -> onNack(from, pkt)
             PacketType.CALL -> onCall(from, pkt)
+            PacketType.SOS -> onSos(from, pkt)
             else -> drop("unexpected type")
         }
     }
@@ -534,7 +732,7 @@ class MeshEngine(
             drop("identity: key changed (pinned)")
             return
         }
-        store.upsertNodeIdentity(pkt.src, id.name, id.publicKey, clock())
+        store.upsertNodeIdentity(pkt.src, id.name, id.publicKey, clock(), id.email)
         forwardBroadcast(pkt, from)
     }
 
@@ -598,9 +796,11 @@ class MeshEngine(
             return
         }
         val now = clock()
-        store.saveMessage(pkt.src, pkt.msgIdHex, false, content, minOf(pkt.timestamp, now), MessageStatus.RECEIVED)
-        _stats.update { it.copy(received = it.received + 1) }
-        _events.tryEmit(MeshEvent.PrivateReceived(pkt.src, content.preview()))
+        if (!acceptContent(pkt.src, pkt.msgIdHex, content, minOf(pkt.timestamp, now))) {
+            dup.forget(pkt.key)                 // e.g. group invitation not here yet: let the retry through later
+            drop("private: group unknown yet")
+            return
+        }
         sendAck(pkt.src, pkt.msgId)
     }
 
@@ -715,10 +915,11 @@ class MeshEngine(
             return
         }
         val now = clock()
-        store.saveMessage(src, idHex, false, content, now, MessageStatus.RECEIVED)
+        if (!acceptContent(src, idHex, content, now)) {
+            drop("media: group unknown yet")
+            return
+        }
         synchronized(completedIn) { completedIn[key] = now }
-        _stats.update { it.copy(received = it.received + 1) }
-        _events.tryEmit(MeshEvent.PrivateReceived(src, content.preview()))
         sendAck(src, idBytes)
     }
 
@@ -973,6 +1174,9 @@ class MeshEngine(
 
     // ------------------------------------------------------------------ identity
 
+    /** Sends our identity (name + e-mail) again, e.g. after the profile changed. */
+    suspend fun refreshIdentity() = broadcastIdentity()
+
     private suspend fun broadcastIdentity() {
         val pkt = identityPacket(Protocol.DEFAULT_TTL)
         dup.checkAndAdd(pkt.key)
@@ -988,7 +1192,7 @@ class MeshEngine(
     private fun identityPacket(ttl: Int): MeshPacket =
         newPacket(
             PacketType.IDENTITY, NodeIds.BROADCAST,
-            Payloads.encodeIdentity(Payloads.Identity(Cap.ALL, nameProvider(), identity.publicBytes)),
+            Payloads.encodeIdentity(Payloads.Identity(Cap.ALL, nameProvider(), identity.publicBytes, emailProvider())),
             ttl, sign = true,
         )
 

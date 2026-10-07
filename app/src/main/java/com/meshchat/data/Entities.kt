@@ -1,5 +1,6 @@
 package com.meshchat.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -14,6 +15,8 @@ data class UserEntity(
     val photoPath: String?,
     val nodeId: String,
     val createdAt: Long,
+    /** Optional; broadcast together with the name. */
+    val email: String = "",
 )
 
 /** Every node we have learned about (name + public key come from signed IDENTITY packets). */
@@ -26,6 +29,7 @@ data class NodeEntity(
     val lastSeen: Long,
     val blocked: Boolean,
     val muted: Boolean,
+    val email: String = "",
 )
 
 /** Private conversation summary (one row per peer). */
@@ -59,6 +63,40 @@ data class MessageEntity(
     val accuracyM: Int,
     val waveform: ByteArray,
     val codec: Int,
+    /** Who wrote it: matters in groups (peerId is the group id there). "" in old rows = the peer. */
+    @ColumnInfo(defaultValue = "''") val senderId: String = "",
+    @ColumnInfo(defaultValue = "''") val replyToId: String = "",
+    @ColumnInfo(defaultValue = "''") val replyQuote: String = "",
+    /** Disappearing messages: epoch ms when this phone deletes it; 0 = never. */
+    @ColumnInfo(defaultValue = "0") val expiresAt: Long = 0,
+    /** Voice clip sent with push-to-talk. */
+    @ColumnInfo(defaultValue = "0") val ptt: Boolean = false,
+) {
+    fun preview(): String = when (kind) {
+        "LOCATION" -> "📍 Location"
+        "IMAGE" -> "📷 Photo"
+        "VOICE" -> (if (ptt) "📻 Push-to-talk" else "🎤 Voice message") + " (${com.meshchat.core.Content.formatDuration(durationMs)})"
+        else -> text
+    }
+}
+
+/** Per-chat settings kept on this phone only: pin to top, mute notifications, disappearing-message timer for what I send. */
+@Entity(tableName = "chat_pref")
+data class ChatPrefEntity(
+    @PrimaryKey val peerId: String,
+    val pinned: Boolean,
+    val muted: Boolean,
+    val disappearSec: Int,
+)
+
+/** Private group (members = comma separated Node IDs). */
+@Entity(tableName = "chat_group")
+data class GroupEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val creator: String,
+    val members: String,
+    val createdAt: Long,
 )
 
 /** Public Announce post. `raw` is the original signed packet so we can serve it during sync. */
@@ -114,4 +152,21 @@ data class MediaOutInfoRow(
     val expiresAt: Long,
     val attempts: Int,
     val lastAttempt: Long,
+)
+
+/** Latest SOS from each person we heard (active or "safe"). Kept on this phone only. */
+@Entity(tableName = "sos_event")
+data class SosEntity(
+    @PrimaryKey val nodeId: String,
+    val name: String,
+    val active: Boolean,
+    val battery: Int,
+    val hasLocation: Boolean,
+    val lat: Double,
+    val lon: Double,
+    val accuracyM: Int,
+    val timestamp: Long,
+    val hops: Int,
+    val verified: Boolean,
+    val seen: Boolean,
 )

@@ -20,7 +20,7 @@ import javax.crypto.spec.GCMParameterSpec
  *
  * Reinstall / "clear data" => the preferences are gone => a NEW key pair => a NEW Node ID.
  * That is deliberate: there is no recovery path an attacker could abuse. If you want continuity across
- * devices, add an explicit, user-passphrase-protected export (not implemented in v1).
+ * devices, use Settings > Identity backup (passphrase-protected JSON export) and restore it on the new install.
  */
 class KeyVault(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("mc_identity", Context.MODE_PRIVATE)
@@ -44,6 +44,15 @@ class KeyVault(context: Context) {
             .putString(KEY_PRIV, Base64.encodeToString(encrypt(id.privateBytes), Base64.NO_WRAP))
             .commit()
         return id
+    }
+
+    /** Replaces the stored identity (used when restoring a backup to get the old Node ID back). */
+    @Synchronized
+    fun save(id: Identity) {
+        prefs.edit()
+            .putString(KEY_PUB, Base64.encodeToString(id.publicBytes, Base64.NO_WRAP))
+            .putString(KEY_PRIV, Base64.encodeToString(encrypt(id.privateBytes), Base64.NO_WRAP))
+            .commit()
     }
 
     private fun wrapKey(): SecretKey {

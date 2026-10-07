@@ -13,7 +13,7 @@ class InMemoryStore : MeshStore {
     val pending = ConcurrentHashMap<String, PendingRecord>()
     val outTransfers = ConcurrentHashMap<String, Pair<OutTransferInfo, ByteArray>>()
 
-    class Msg(val peerId: String, val msgId: String, val outgoing: Boolean, val content: Content, var status: MessageStatus) {
+    class Msg(val peerId: String, val msgId: String, val outgoing: Boolean, val content: Content, var status: MessageStatus, val senderId: String = "") {
         val text: String get() = content.text
     }
 
@@ -23,25 +23,38 @@ class InMemoryStore : MeshStore {
 
     override suspend fun upsertNodeName(nodeId: String, name: String, seen: Long) {
         val o = nodes[nodeId]
-        nodes[nodeId] = NodeRecord(nodeId, name, o?.publicKey, seen, o?.blocked ?: false, o?.muted ?: false)
+        nodes[nodeId] = NodeRecord(nodeId, name, o?.publicKey, seen, o?.blocked ?: false, o?.muted ?: false, o?.email ?: "")
     }
 
-    override suspend fun upsertNodeIdentity(nodeId: String, name: String, publicKey: ByteArray, seen: Long) {
+    override suspend fun upsertNodeIdentity(nodeId: String, name: String, publicKey: ByteArray, seen: Long, email: String) {
         val o = nodes[nodeId]
-        nodes[nodeId] = NodeRecord(nodeId, name, publicKey, seen, o?.blocked ?: false, o?.muted ?: false)
+        nodes[nodeId] = NodeRecord(nodeId, name, publicKey, seen, o?.blocked ?: false, o?.muted ?: false, email)
     }
 
     override suspend fun setNodeFlags(nodeId: String, blocked: Boolean, muted: Boolean) {
         val o = nodes[nodeId] ?: NodeRecord(nodeId, "", null, 0)
-        nodes[nodeId] = NodeRecord(nodeId, o.name, o.publicKey, o.lastSeen, blocked, muted)
+        nodes[nodeId] = NodeRecord(nodeId, o.name, o.publicKey, o.lastSeen, blocked, muted, o.email)
     }
 
     override suspend fun blockedIds() = nodes.values.filter { it.blocked }.map { it.nodeId }.toSet()
     override suspend fun mutedIds() = nodes.values.filter { it.muted }.map { it.nodeId }.toSet()
 
-    override suspend fun saveMessage(peerId: String, msgIdHex: String, outgoing: Boolean, content: Content, timestamp: Long, status: MessageStatus) {
-        messages[msgIdHex] = Msg(peerId, msgIdHex, outgoing, content, status)
+    override suspend fun saveMessage(peerId: String, msgIdHex: String, outgoing: Boolean, content: Content, timestamp: Long, status: MessageStatus, senderId: String) {
+        messages[msgIdHex] = Msg(peerId, msgIdHex, outgoing, content, status, senderId)
     }
+
+    val groups = ConcurrentHashMap<String, GroupRecord>()
+    override suspend fun deleteMessageLocal(msgIdHex: String) { messages.remove(msgIdHex) }
+    override suspend fun deleteMessageFrom(msgIdHex: String, senderId: String): Boolean {
+        val m = messages[msgIdHex] ?: return false
+        if (m.outgoing || (m.senderId.ifEmpty { m.peerId }) != senderId) return false
+        messages.remove(msgIdHex)
+        return true
+    }
+    override suspend fun saveGroup(group: GroupRecord) { groups[group.id] = group }
+    override suspend fun getGroup(id: String) = groups[id]
+    override suspend fun allGroups() = groups.values.toList()
+    override suspend fun deleteGroup(id: String) { groups.remove(id) }
 
     override suspend fun updateMessageStatus(msgIdHex: String, status: MessageStatus) {
         messages[msgIdHex]?.status = status

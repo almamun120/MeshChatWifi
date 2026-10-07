@@ -39,6 +39,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
@@ -79,24 +81,29 @@ fun startResultText(r: StartResult): String? = when (r) {
  * Returns a function that asks for the microphone / camera / Wi-Fi permissions the call needs and then starts it.
  * [onMessage] gets any error text.
  */
+class CallStarter(val start: (String, Boolean, Boolean) -> Unit) {
+    operator fun invoke(peer: String, video: Boolean) = start(peer, video, false)
+    fun walkieTalkie(peer: String) = start(peer, false, true)
+}
+
 @Composable
-fun rememberCallStarter(vm: MainViewModel, onMessage: (String) -> Unit): (String, Boolean) -> Unit {
+fun rememberCallStarter(vm: MainViewModel, onMessage: (String) -> Unit): CallStarter {
     val ctx = LocalContext.current
-    var pending by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+    var pending by remember { mutableStateOf<Triple<String, Boolean, Boolean>?>(null) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         val p = pending
         pending = null
         if (p != null) {
             if (CallPermissions.missing(ctx, CallPermissions.forCall(p.second)).isEmpty()) {
-                startResultText(vm.startCall(p.first, p.second))?.let(onMessage)
+                startResultText(vm.startCall(p.first, p.second, p.third))?.let(onMessage)
             } else onMessage("Microphone" + (if (p.second) ", camera" else "") + " and nearby-devices permission are needed for calls")
         }
     }
-    return { peer, video ->
+    return CallStarter { peer, video, ptt ->
         val missing = CallPermissions.missing(ctx, CallPermissions.forCall(video))
-        if (missing.isEmpty()) startResultText(vm.startCall(peer, video))?.let(onMessage)
+        if (missing.isEmpty()) startResultText(vm.startCall(peer, video, ptt))?.let(onMessage)
         else {
-            pending = peer to video
+            pending = Triple(peer, video, ptt)
             launcher.launch(missing.toTypedArray())
         }
     }
@@ -131,7 +138,7 @@ fun CallOverlay(vm: MainViewModel, peerName: String) {
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
-                if (ui.video) "MeshChat video call · end-to-end encrypted" else "MeshChat call · end-to-end encrypted",
+                if (ui.ptt) "MeshChat walkie-talkie · end-to-end encrypted" else if (ui.video) "MeshChat video call · end-to-end encrypted" else "MeshChat call · end-to-end encrypted",
                 color = Color(0xCCFFFFFF), fontSize = 12.sp,
             )
             Spacer(Modifier.height(14.dp))
@@ -171,7 +178,7 @@ fun CallOverlay(vm: MainViewModel, peerName: String) {
 private fun statusText(ui: CallUi, now: Long): String = when (ui.phase) {
     CallPhase.CALLING -> "Calling…"
     CallPhase.RINGING -> "Ringing…"
-    CallPhase.INCOMING -> if (ui.video) "Incoming video call" else "Incoming call"
+    CallPhase.INCOMING -> if (ui.ptt) "Walkie-talkie request" else if (ui.video) "Incoming video call" else "Incoming call"
     CallPhase.CONNECTING -> "Connecting…"
     CallPhase.ACTIVE -> clockText(((now - ui.connectedAtMs) / 1000).coerceAtLeast(0))
     CallPhase.ENDED -> ui.endReason.label()
@@ -205,13 +212,28 @@ private fun IncomingButtons(onDecline: () -> Unit, onAnswer: () -> Unit) {
 private fun ActiveButtons(ui: CallUi, vm: MainViewModel) {
     val connecting = ui.phase != CallPhase.ACTIVE
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(bottom = 12.dp)) {
+        if (ui.ptt) {
+            // Hold to talk: the microphone is open only while the finger is down.
+            Box(
+                Modifier.fillMaxWidth().height(96.dp).padding(bottom = 12.dp).clip(RoundedCornerShape(48.dp))
+                    .background(if (!ui.muted) Green else Glass)
+                    .alpha(if (connecting) 0.4f else 1f)
+                    .pointerInput(connecting) {
+                        if (!connecting) detectTapGestures(onPress = {
+                            vm.setMuted(false)
+                            try { tryAwaitRelease() } finally { vm.setMuted(true) }
+                        })
+                    },
+                contentAlignment = Alignment.Center,
+            ) { Text(if (!ui.muted) "🎙 Talking… release to listen" else "🎙 Hold to talk", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold) }
+        }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
             ToggleAction("Speaker", "🔊", ui.speaker, !connecting) { vm.setSpeaker(!ui.speaker) }
             if (ui.video) {
                 ToggleAction(if (ui.cameraOn) "Camera off" else "Camera on", if (ui.cameraOn) "📹" else "🚫", !ui.cameraOn, !connecting) { vm.setCamera(!ui.cameraOn) }
                 ToggleAction("Flip", "🔄", false, !connecting && ui.cameraOn) { vm.switchCamera() }
             }
-            ToggleAction(if (ui.muted) "Unmute" else "Mute", if (ui.muted) "🔇" else "🎤", ui.muted, !connecting) { vm.setMuted(!ui.muted) }
+            if (!ui.ptt) ToggleAction(if (ui.muted) "Unmute" else "Mute", if (ui.muted) "🔇" else "🎤", ui.muted, !connecting) { vm.setMuted(!ui.muted) }
         }
         Spacer(Modifier.height(26.dp))
         RoundAction(if (ui.phase == CallPhase.CALLING || ui.phase == CallPhase.RINGING) "Cancel" else "End", Red, 72.dp, vm::hangUp) {

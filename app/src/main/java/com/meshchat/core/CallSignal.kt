@@ -8,7 +8,9 @@ import java.nio.ByteBuffer
  * The same signals drive voice calls, video calls and file transfers; [SessionKind] says which one.
  */
 enum class SessionKind(val code: Int) {
-    AUDIO(0), VIDEO(1), FILES(2);
+    AUDIO(0), VIDEO(1), FILES(2),
+    /** Live push-to-talk: an audio session whose microphones start muted; each side opens its mic only while holding the button. */
+    PTT(3);
 
     companion object {
         fun fromCode(c: Int): SessionKind? = entries.firstOrNull { it.code == c }
@@ -46,6 +48,7 @@ class CallSignal(
 ) {
     val callIdHex: String get() = Hex.encode(callId)
     val video: Boolean get() = kind == SessionKind.VIDEO
+    val ptt: Boolean get() = kind == SessionKind.PTT
 }
 
 /**

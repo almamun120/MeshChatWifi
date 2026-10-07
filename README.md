@@ -177,7 +177,18 @@ MeshChat/
 ```
 
 ## পরের ধাপ (roadmap)
-Forward-secret private chat (ephemeral keys) · rotating advertisement ID · mute/report UI · passphrase-protected identity export · profile photo-র compressed thumbnail sync · Wi-Fi Aware/Nearby transport (বেশি bandwidth) · adaptive route-ad যুক্তি বড় mesh-এর জন্য।
+Forward-secret private chat (ephemeral keys) · rotating advertisement ID · report UI · profile photo-র compressed thumbnail sync · Wi-Fi Aware/Nearby transport (বেশি bandwidth) · adaptive route-ad যুক্তি বড় mesh-এর জন্য।
 
 ## Calls & File Share
 Audio/video calls (WebRTC) and ShareIt-style file transfer over BLE-signalled Wi-Fi Direct. See docs/CALLS.md.
+
+## নতুন ফিচার (v1.1) — chat, group, SOS, push-to-talk, identity backup
+বিস্তারিত: [docs/FEATURES.md](docs/FEATURES.md)।
+
+- **Identity backup (JSON):** Settings → Export identity backup (পাসফ্রেজ দিয়ে AES-256-GCM, PBKDF2 210k)। নতুন install-এর প্রথম স্ক্রিনে "Restore from backup" দিলে পুরোনো Node ID ফেরে।
+- **Chat:** reply (quote), delete (নিজের ফোনে / সবার জন্য — শুধু নিজের পাঠানো মেসেজ), search (চ্যাটের ভেতরে ও সব চ্যাটে), pin, mute, disappearing messages (৫ মিনিট–৭ দিন)।
+- **Private group:** সর্বোচ্চ ৮ জন; প্রতিটি মেসেজ প্রতি সদস্যকে আলাদা E2E-encrypted প্যাকেটে যায়।
+- **SOS:** signed BLE flood, ~৪৫ সেকেন্ড পরপর পুনরাবৃত্তি, "I'm safe" না দেওয়া পর্যন্ত; location ঐচ্ছিক; রিসিভার Settings-এ বন্ধ রাখতে পারে।
+- **Push-to-talk:** (ক) ≤১৫ সেকেন্ডের ক্লিপ BLE mesh-এ (📻 বোতাম), (খ) লাইভ walkie-talkie Wi-Fi Direct-এ (chat মেনু)। রিসিভার Settings → Push-to-talk থেকে বন্ধ করতে পারে।
+
+**যাচাই-অবস্থা:** এই ফিচারগুলোর `core/` অংশ JVM test-এ পাস। Android UI/Room/Notification অংশ আমার পরিবেশে build বা ফোনে চালানো হয়নি।
