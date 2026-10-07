@@ -86,6 +86,7 @@ fun sendResultMessage(r: SendResult): String? = when (r) {
     SendResult.NOT_RUNNING -> "Mesh is not running (check Bluetooth and permissions)"
     SendResult.QUEUE_FULL -> "Too many photos/voice messages are waiting to be delivered. Wait for some to finish."
     SendResult.BAD_MEDIA -> "That file could not be prepared for sending"
+    SendResult.NO_GROUP -> "This group no longer exists, or you are not a member of it any more"
 }
 
 // ---------------------------------------------------------------------------------------------- Announce
