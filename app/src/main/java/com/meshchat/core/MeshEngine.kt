@@ -866,11 +866,8 @@ class MeshEngine(
             reAck(pkt.src, ch.idHex, now)      // sender never saw our ACK
             return
         }
-        val senderKey = store.getNode(pkt.src)?.publicKey
-        if (senderKey == null) {
-            drop("media: sender key unknown yet")
-            return
-        }
+        // Chunks are only ciphertext, so they can be collected before the sender's IDENTITY has arrived (the two phones
+        // rarely learn each other's key at the same instant). The key is needed only to decrypt the finished blob.
         var reject: String? = null
         var finished: InTransfer? = null
         synchronized(incoming) {
@@ -896,7 +893,17 @@ class MeshEngine(
             drop(it)
             return
         }
-        finished?.let { finishIncoming(pkt.src, ch.idHex, key, it, senderKey) }
+        finished?.let { tryFinishIncoming(pkt.src, ch.idHex, key, it) }
+    }
+
+    /** Decrypts a complete transfer; if the sender's key is still unknown it stays queued and is retried on every tick. */
+    private suspend fun tryFinishIncoming(src: String, idHex: String, key: String, t: InTransfer) {
+        val senderKey = store.getNode(src)?.publicKey
+        if (senderKey == null) {
+            synchronized(incoming) { incoming[key] = t }
+            return
+        }
+        finishIncoming(src, idHex, key, t, senderKey)
     }
 
     private suspend fun finishIncoming(src: String, idHex: String, key: String, t: InTransfer, senderKey: ByteArray) {
@@ -941,6 +948,7 @@ class MeshEngine(
         class Nack(val src: String, val idHex: String, val missing: List<Int>)
 
         val list = ArrayList<Nack>()
+        val complete = ArrayList<Pair<String, InTransfer>>()
         synchronized(incoming) {
             val it = incoming.entries.iterator()
             while (it.hasNext()) {
@@ -950,12 +958,22 @@ class MeshEngine(
                     it.remove()
                     continue
                 }
+                if (t.count == t.total) {              // every chunk is here, only the sender's key was missing
+                    complete.add(e.key to t)
+                    continue
+                }
                 if (now - t.lastChunkAt >= config.nackIdleMs && now - t.lastNackAt >= config.nackIdleMs) {
                     t.lastNackAt = now
                     val missing = (0 until t.total).filter { i -> t.chunks[i] == null }
                     list.add(Nack(e.key.substringBefore(':'), e.key.substringAfter(':'), missing))
                 }
             }
+        }
+        for ((key, t) in complete) {
+            val src = key.substringBefore(':')
+            if (store.getNode(src)?.publicKey == null) continue
+            val taken = synchronized(incoming) { incoming.remove(key) === t }
+            if (taken) tryFinishIncoming(src, key.substringAfter(':'), key, t)
         }
         for (n in list) {
             MeshLog.log("media ${n.idHex.take(6)} stalled, NACK ${n.missing.size} missing chunks to ${n.src.take(8)}")
