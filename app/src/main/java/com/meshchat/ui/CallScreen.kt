@@ -125,6 +125,12 @@ fun CallOverlay(vm: MainViewModel, peerName: String) {
     }
 
     val showVideo = ui.video && ui.phase == CallPhase.ACTIVE
+    // The display stays on while the call screen is up (the proximity sensor still switches it off at the ear).
+    val view = androidx.compose.ui.platform.LocalView.current
+    DisposableEffect(Unit) {
+        view.keepScreenOn = true
+        onDispose { view.keepScreenOn = false }
+    }
     Box(
         Modifier.fillMaxSize()
             .background(Brush.verticalGradient(listOf(Color(0xFF0B141A), Color(0xFF123C45), Color(0xFF0B141A)))),

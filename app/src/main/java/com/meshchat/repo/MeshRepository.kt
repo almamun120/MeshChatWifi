@@ -385,7 +385,10 @@ class MeshRepository(private val context: Context) {
     private var lastCallPhase = com.meshchat.core.CallPhase.IDLE
 
     /** Incoming-call notification (so a call is noticed with the screen off) and the service's media foreground type. */
+    private val callKeeper = com.meshchat.call.CallKeeper(appContext)
+
     private suspend fun onCallState(ui: CallUi) {
+        callKeeper.update(ui)
         if (ui.phase == com.meshchat.core.CallPhase.INCOMING && lastCallPhase != ui.phase) {
             if (!(ui.ptt && com.meshchat.data.AppSettings.pttAutoAnswer.value)) Notifier.incomingCall(appContext, peerName(ui.peerId), ui.video, ui.ptt)
         }

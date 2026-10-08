@@ -180,7 +180,7 @@ class WebRtcLink(ctx: Context) : CallLink {
         VideoHub.setFront(front)
         textureHelper = SurfaceTextureHelper.create("capture", VideoHub.egl.eglBaseContext)
         videoSource = f.createVideoSource(false)
-        capturer = enumerator.createCapturer(name, null)
+        capturer = enumerator.createCapturer(name, cameraEvents)
         capturer?.initialize(textureHelper, appCtx, videoSource!!.capturerObserver)
         capturer?.startCapture(VIDEO_W, VIDEO_H, VIDEO_FPS)
         cameraOn = true
@@ -291,6 +291,29 @@ class WebRtcLink(ctx: Context) : CallLink {
             }
         }
         return System.currentTimeMillis() - lastRx.get()
+    }
+
+    // The system may take the camera away (screen off, another app, OEM power rules). Bring it back instead of freezing the picture.
+    private var cameraRetries = 0
+    private val cameraEvents = object : CameraVideoCapturer.CameraEventsHandler {
+        override fun onCameraError(e: String?) = restartCamera("error $e")
+        override fun onCameraDisconnected() = restartCamera("disconnected")
+        override fun onCameraFreezed(e: String?) = restartCamera("freezed $e")
+        override fun onCameraOpening(cameraName: String?) {}
+        override fun onFirstFrameAvailable() { cameraRetries = 0 }
+        override fun onCameraClosed() {}
+    }
+
+    private fun restartCamera(why: String) {
+        if (closed.get() || !cameraOn || cameraRetries >= 30) return
+        cameraRetries++
+        MeshLog.log("webrtc: camera $why, restart #$cameraRetries")
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (!closed.get() && cameraOn) runCatching {
+                capturer?.stopCapture()
+                capturer?.startCapture(VIDEO_W, VIDEO_H, VIDEO_FPS)
+            }
+        }, 1_500)
     }
 
     override fun setMuted(muted: Boolean) { audioTrack?.setEnabled(!muted) }
