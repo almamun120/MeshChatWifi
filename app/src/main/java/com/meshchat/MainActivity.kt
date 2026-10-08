@@ -96,6 +96,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Opened by the incoming-call notification: show over the lock screen and wake the display right away,
+        // before the call state reaches the UI.
+        if (intent?.getBooleanExtra(EXTRA_INCOMING_CALL, false) == true) showOverLockScreen(true)
         enableEdgeToEdge()
         setContent {
             MeshChatTheme {
@@ -104,6 +107,16 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_INCOMING_CALL, false)) showOverLockScreen(true)
+    }
+
+    companion object {
+        const val EXTRA_INCOMING_CALL = "incoming_call"
     }
 
     /** While a call is ringing / running the call screen may show over the lock screen and wake the display. */
@@ -350,7 +363,7 @@ private fun MainScaffold(vm: MainViewModel, myNodeId: String, myName: String, re
                 Screen.Topology -> TopologyScreen(vm, myName)
                 Screen.SharePick -> SharePickScreen(vm, showMessage)
                 Screen.SharePeers -> SharePeersScreen(vm, showMessage)
-                Screen.ShareReceive -> ShareReceiveScreen(myName)
+                Screen.ShareReceive -> ShareReceiveScreen(vm, myName)
                 Screen.Settings -> SettingsScreen(vm)
                 Screen.About -> AboutScreen()
                 Screen.Sos -> com.meshchat.ui.SosScreen(vm, { vm.open(Screen.Chat(it)) }, showMessage)

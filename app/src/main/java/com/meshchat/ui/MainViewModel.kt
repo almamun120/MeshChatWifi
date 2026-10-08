@@ -143,7 +143,12 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
         val have = _selection.value.map { it.uri }.toSet()
         _selection.value = _selection.value + items.filter { it.uri !in have }
     }
+    fun removeSelected(items: List<MediaItem>) {
+        val gone = items.map { it.uri }.toSet()
+        _selection.value = _selection.value.filter { it.uri !in gone }
+    }
     fun clearSelection() { _selection.value = emptyList() }
+    fun setReceiveReady(on: Boolean) = repo.setReceiveReady(on)
 
     fun sendSelected(peerId: String): StartResult {
         val r = repo.sendFiles(peerId, _selection.value.map { it.uri })

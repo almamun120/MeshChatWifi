@@ -45,6 +45,7 @@ import androidx.compose.material3.Tab as MTab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -104,7 +105,7 @@ fun ShareHomeScreen(vm: MainViewModel) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("How it works", fontWeight = FontWeight.SemiBold)
                 Text("1. Pick files and choose a nearby person.", style = MaterialTheme.typography.bodyMedium)
-                Text("2. They get a request over Bluetooth and tap Accept.", style = MaterialTheme.typography.bodyMedium)
+                Text("2. The other person opens Receive, then gets your request over Bluetooth and taps Accept.", style = MaterialTheme.typography.bodyMedium)
                 Text("3. Both phones switch to a private Wi-Fi Direct link and the files fly across, fast and encrypted.", style = MaterialTheme.typography.bodyMedium)
                 Text("Received files are saved in Downloads/MeshChat.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
             }
@@ -125,7 +126,12 @@ private fun BigShareButton(label: String, glyph: String, color: Color, modifier:
 }
 
 @Composable
-fun ShareReceiveScreen(myName: String) {
+fun ShareReceiveScreen(vm: MainViewModel, myName: String) {
+    // Offers are accepted only while this screen is open; leaving it (back, other tab) stops receiving.
+    DisposableEffect(Unit) {
+        vm.setReceiveReady(true)
+        onDispose { vm.setReceiveReady(false) }
+    }
     val t = rememberInfiniteTransition(label = "radar")
     val k by t.animateFloat(0.4f, 2.2f, infiniteRepeatable(tween(2200), RepeatMode.Restart), label = "k")
     Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
@@ -135,10 +141,12 @@ fun ShareReceiveScreen(myName: String) {
             Avatar(myName, size = 96.dp)
         }
         Spacer(Modifier.height(16.dp))
+        Text("● Receiving mode ON", color = ShareTeal, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(4.dp))
         Text("Ready to receive as $myName", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(8.dp))
         Text(
-            "Keep this app open (or running in the background). When someone nearby sends you files, you will be asked to accept.",
+            "Stay on this screen. Files can only be received while it is open; when someone nearby sends you files you will be asked to accept.",
             color = MaterialTheme.colorScheme.outline,
         )
     }
@@ -173,7 +181,7 @@ fun SharePickScreen(vm: MainViewModel, onMessage: (String) -> Unit) {
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
-                kind == MediaKind.FILE -> FilesTab(selection.filter { it.kind == MediaKind.FILE }, { picker.launch(arrayOf("*/*")) }) { vm.toggleSelected(it) }
+                kind == MediaKind.FILE -> FileManager(vm, onSystemPicker = { picker.launch(arrayOf("*/*")) }, onMessage = onMessage)
                 !granted -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Allow access to your ${labels[tab].lowercase()} to choose what to send.", color = MaterialTheme.colorScheme.outline)
                     Spacer(Modifier.height(12.dp))
@@ -211,23 +219,6 @@ fun SharePickScreen(vm: MainViewModel, onMessage: (String) -> Unit) {
                 OutlinedButton(onClick = vm::clearSelection) { Text("Clear") }
                 Spacer(Modifier.size(8.dp))
                 Button(onClick = { vm.open(Screen.SharePeers) }) { Text("Send") }
-            }
-        }
-    }
-}
-
-@Composable
-private fun FilesTab(chosen: List<MediaItem>, onBrowse: () -> Unit, onToggle: (MediaItem) -> Unit) {
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Button(onClick = onBrowse, modifier = Modifier.fillMaxWidth()) { Text("Browse files…") }
-        Text(
-            "Documents, archives, APKs, anything. The system file browser also reaches Downloads and your other storage.",
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(vertical = 8.dp),
-        )
-        LazyColumn {
-            items(chosen, key = { it.uri.toString() }) { m ->
-                FileLine(m, true) { onToggle(m) }
-                HorizontalDivider()
             }
         }
     }

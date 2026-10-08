@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
@@ -55,6 +56,25 @@ fun SettingsScreen(vm: MainViewModel) {
     val xferN by AppSettings.transferNotifications.collectAsState()
     val vib by AppSettings.callVibrate.collectAsState()
     val use5 by AppSettings.use5Ghz.collectAsState()
+    val sosTone by AppSettings.sosTone.collectAsState()
+    // re-check the call-screen permissions every time the user comes back from system settings
+    var resumes by remember { mutableStateOf(0) }
+    val owner = ctx as? androidx.lifecycle.LifecycleOwner
+    androidx.compose.runtime.DisposableEffect(owner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e -> if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) resumes++ }
+        owner?.lifecycle?.addObserver(obs)
+        onDispose { owner?.lifecycle?.removeObserver(obs) }
+    }
+    val overlayOk = remember(resumes) { android.provider.Settings.canDrawOverlays(ctx) }
+    val fullScreenOk = remember(resumes) {
+        Build.VERSION.SDK_INT < 34 || ctx.getSystemService(android.app.NotificationManager::class.java).canUseFullScreenIntent()
+    }
+    val sosPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        if (r.resultCode == android.app.Activity.RESULT_OK) {
+            val picked: Uri? = r.data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+            AppSettings.setSosTone(picked?.toString() ?: "")
+        }
+    }
     val sosOn by AppSettings.sosAlerts.collectAsState()
     val pttOn by AppSettings.pttEnabled.collectAsState()
     val pttPlay by AppSettings.pttAutoPlay.collectAsState()
@@ -119,6 +139,47 @@ fun SettingsScreen(vm: MainViewModel) {
                     "but only if both phones support 5 GHz Wi-Fi Direct. The phone that starts the call or transfer decides.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
             )
+        }
+        Section("Incoming call screen") {
+            Text(
+                "To make the call screen fill the whole display (like a normal phone call), allow MeshChat to display over other apps" +
+                    (if (Build.VERSION.SDK_INT >= 34) " and to use full-screen alerts." else "."),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+            )
+            Text(if (overlayOk) "✅ Display over other apps: allowed" else "⚠ Display over other apps: not allowed")
+            if (!overlayOk) Button(onClick = {
+                ctx.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + ctx.packageName)))
+            }) { Text("Allow display over other apps") }
+            if (Build.VERSION.SDK_INT >= 34) {
+                Text(if (fullScreenOk) "✅ Full-screen alerts: allowed" else "⚠ Full-screen alerts: not allowed")
+                if (!fullScreenOk) Button(onClick = {
+                    ctx.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:" + ctx.packageName)))
+                }) { Text("Allow full-screen alerts") }
+            }
+        }
+        Section("SOS alert tone") {
+            Text(
+                when {
+                    sosTone == null -> "Phone's default alarm sound"
+                    sosTone!!.isEmpty() -> "Silent (vibration only)"
+                    else -> runCatching { RingtoneManager.getRingtone(ctx, Uri.parse(sosTone))?.getTitle(ctx) }.getOrNull() ?: "Custom"
+                },
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    val i = Intent(RingtoneManager.ACTION_RINGTONE_PICKER)
+                        .putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALL)
+                        .putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "SOS alert tone")
+                        .putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
+                        .putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+                        .putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, sosTone?.takeIf { it.isNotEmpty() }?.let(Uri::parse))
+                    sosPicker.launch(i)
+                }) { Text("Choose tone") }
+                if (sosTone != null) OutlinedButton(onClick = { AppSettings.setSosTone(null) }) { Text("Use default") }
+                OutlinedButton(onClick = {
+                    com.meshchat.service.Notifier.notifySos(ctx, "test", "Test", true, "This is a test of the SOS alert tone")
+                }) { Text("Test") }
+            }
         }
         Section("Ringtone") {
             Text(

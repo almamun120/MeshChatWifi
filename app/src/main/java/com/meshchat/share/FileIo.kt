@@ -25,6 +25,12 @@ class UriFileSource(private val ctx: Context, private val uri: Uri, override val
         fun create(ctx: Context, uri: Uri, index: Int): UriFileSource? {
             var name = "file"
             var size = -1L
+            if (uri.scheme == "file") {                       // from the in-app file manager
+                val f = java.io.File(uri.path ?: return null)
+                if (!f.isFile || !f.canRead()) return null
+                val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(f.extension.lowercase()) ?: "application/octet-stream"
+                return UriFileSource(ctx, uri, FileMeta(index, FileNames.sanitize(f.name), f.length(), mime))
+            }
             runCatching {
                 ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
                     if (c.moveToFirst()) {

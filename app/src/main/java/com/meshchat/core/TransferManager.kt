@@ -26,7 +26,7 @@ enum class TransferEnd {
         DECLINED -> "Declined"
         MISSED -> "Missed offer"
         NO_ANSWER -> "No answer"
-        BUSY -> "The other phone is busy"
+        BUSY -> "The other phone is busy or is not on the Receive screen"
         UNREACHABLE -> "Not in range"
         FAILED -> "Could not connect. Move closer to each other"
         LOST -> "Connection lost"
@@ -115,6 +115,8 @@ class TransferManager(
     private val onFinished: (TransferRecord) -> Unit,
     private val config: TransferConfig = TransferConfig(),
     private val clock: () -> Long = { System.currentTimeMillis() },
+    /** Offers are only taken while the user is on the Receive screen; otherwise the sender is told we are not ready. */
+    private val acceptIncoming: () -> Boolean = { true },
 ) {
     private class Session(
         val id: ByteArray, val peerId: String, val outgoing: Boolean, val offer: OfferInfo, val startedAt: Long,
@@ -243,7 +245,9 @@ class TransferManager(
                 CallSignalType.INVITE -> {
                     if (s == null) {
                         val offer = sig.offer
-                        if (offer != null && gate.tryAcquire(sig.callIdHex)) {
+                        if (offer != null && !acceptIncoming()) {
+                            reply = CallSignal(CallSignalType.BUSY, sig.callId, SessionKind.FILES)     // not in Receive mode
+                        } else if (offer != null && gate.tryAcquire(sig.callIdHex)) {
                             val n = Session(sig.callId, peerId, false, offer, clock())
                             n.phase = TransferPhase.ASKING
                             cur = n

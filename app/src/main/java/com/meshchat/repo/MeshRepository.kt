@@ -302,7 +302,7 @@ class MeshRepository(private val context: Context) {
                     acceptPtt = { com.meshchat.data.AppSettings.pttEnabled.value },
                     autoAnswerPtt = { com.meshchat.data.AppSettings.pttAutoAnswer.value },
                 ))
-                val transfers = TransferManager(scope, signaler, gate, { WifiTransferLink(appContext) }, { DownloadsSink(appContext) }, ::onTransferFinished)
+                val transfers = TransferManager(scope, signaler, gate, { WifiTransferLink(appContext) }, { DownloadsSink(appContext) }, ::onTransferFinished, acceptIncoming = { receiveReady && appVisible })
                 callMgr.value = calls
                 xferMgr.value = transfers
                 scope.launch {
@@ -427,6 +427,10 @@ class MeshRepository(private val context: Context) {
     fun switchCamera() { callMgr.value?.switchCamera() }
 
     // ---------------------------------------------------------------- file transfer
+
+    /** True only while the Share > Receive screen is open: nothing is accepted (or even announced) otherwise. */
+    @Volatile private var receiveReady = false
+    fun setReceiveReady(on: Boolean) { receiveReady = on }
 
     fun sendFiles(peerId: String, uris: List<Uri>): StartResult {
         val sources: List<FileSource> = uris.mapIndexedNotNull { i, u -> UriFileSource.create(appContext, u, i) }

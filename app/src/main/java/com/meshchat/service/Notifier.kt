@@ -42,15 +42,39 @@ object Notifier {
         )
     }
 
-    fun createSosChannel(ctx: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        ctx.getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CH_SOS, "SOS alerts", NotificationManager.IMPORTANCE_HIGH).apply {
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 600, 300, 600, 300, 600)
-                setBypassDnd(true)
-            },
-        )
+    /**
+     * A notification channel's sound cannot be changed once created, so every tone gets its own channel
+     * (id = mesh_sos_<tone>); channels of tones that are no longer selected are removed. Returns the channel id.
+     */
+    fun createSosChannel(ctx: Context): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return CH_SOS
+        val tone = com.meshchat.data.AppSettings.sosTone.value
+        val id = CH_SOS + "_" + when (tone) { null -> "default"; "" -> "silent"; else -> Integer.toHexString(tone.hashCode()) }
+        val nm = ctx.getSystemService(NotificationManager::class.java)
+        nm.notificationChannels.filter { it.id.startsWith(CH_SOS) && it.id != id }.forEach { nm.deleteNotificationChannel(it.id) }
+        if (nm.getNotificationChannel(id) == null) {
+            val sound: android.net.Uri? = when (tone) {
+                null -> android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_ALARM)
+                    ?: android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION)
+                "" -> null
+                else -> android.net.Uri.parse(tone)
+            }
+            nm.createNotificationChannel(
+                NotificationChannel(id, "SOS alerts", NotificationManager.IMPORTANCE_HIGH).apply {
+                    enableVibration(true)
+                    vibrationPattern = longArrayOf(0, 600, 300, 600, 300, 600)
+                    setBypassDnd(true)
+                    setSound(
+                        sound,
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_ALARM)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build(),
+                    )
+                },
+            )
+        }
+        return id
     }
 
     /** Loud heads-up notification for someone's SOS; an "I'm safe" update replaces it quietly. */
@@ -58,9 +82,9 @@ object Notifier {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
-        createSosChannel(ctx)
+        val channel = createSosChannel(ctx)
         val open = openApp(ctx)
-        val b = NotificationCompat.Builder(ctx, CH_SOS)
+        val b = NotificationCompat.Builder(ctx, channel)
             .setSmallIcon(R.drawable.ic_stat_mesh)
             .setContentTitle(if (active) "🆘 SOS from $name" else "✅ $name is safe")
             .setContentText(detail)
@@ -126,6 +150,7 @@ object Notifier {
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
         val open = openApp(ctx)
+        val screen = callScreenIntent(ctx)
         val n = NotificationCompat.Builder(ctx, CH_CALLS)
             .setSmallIcon(R.drawable.ic_stat_mesh)
             .setContentTitle(if (ptt) "Walkie-talkie request" else "Incoming " + (if (video) "video call" else "call"))
@@ -133,14 +158,38 @@ object Notifier {
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setOngoing(true)
-            .setContentIntent(open)
-            .setFullScreenIntent(open, true)
+            .setContentIntent(screen)
+            .setFullScreenIntent(screen, true)
             .build()
         try {
             NotificationManagerCompat.from(ctx).notify(ID_CALL, n)
         } catch (_: SecurityException) {
         }
+        // A full-screen intent only takes over the screen when the phone is locked or off; while the phone is in use
+        // Android shows a small banner. With "display over other apps" allowed the call screen is opened directly.
+        if (android.provider.Settings.canDrawOverlays(ctx)) {
+            try {
+                ctx.startActivity(callActivityIntent(ctx).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (_: Exception) {
+            }
+        }
     }
+
+    private fun callActivityIntent(ctx: Context): Intent =
+        Intent(ctx, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            .putExtra(MainActivity.EXTRA_INCOMING_CALL, true)
+
+    private fun callScreenIntent(ctx: Context): PendingIntent =
+        PendingIntent.getActivity(
+            ctx, 2, callActivityIntent(ctx).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+
+    /** True when the system lets this app take over the screen for a call (Android 14+ can revoke it). */
+    fun canShowFullScreenCall(ctx: Context): Boolean =
+        android.provider.Settings.canDrawOverlays(ctx) ||
+            (Build.VERSION.SDK_INT < 34 || ctx.getSystemService(NotificationManager::class.java).canUseFullScreenIntent())
 
     fun cancelIncomingCall(ctx: Context) {
         NotificationManagerCompat.from(ctx).cancel(ID_CALL)

@@ -19,6 +19,14 @@ object AppSettings {
     /** null = phone's default ringtone, "" = silent, otherwise a ringtone Uri. */
     val ringtone: StateFlow<String?> = _ringtone.asStateFlow()
 
+    private val _sosTone = MutableStateFlow<String?>(null)
+    /** null = the phone's default alarm sound, "" = silent, otherwise a sound Uri. */
+    val sosTone: StateFlow<String?> = _sosTone.asStateFlow()
+    fun setSosTone(uri: String?) {
+        _sosTone.value = uri
+        prefs.edit().apply { if (uri == null) remove("sos_tone") else putString("sos_tone", uri) }.apply()
+    }
+
     private val _messageNotif = MutableStateFlow(true)
     val messageNotifications: StateFlow<Boolean> = _messageNotif.asStateFlow()
     private val _callNotif = MutableStateFlow(true)
@@ -78,6 +86,7 @@ object AppSettings {
         _transferNotif.value = prefs.getBoolean("notif_transfers", true)
         _callVibrate.value = prefs.getBoolean("call_vibrate", true)
         _use5Ghz.value = prefs.getBoolean("wifi_5ghz", false)
+        _sosTone.value = if (prefs.contains("sos_tone")) prefs.getString("sos_tone", "") else null
         announceClearedAt = prefs.getLong("announce_cleared_at", 0L)
         _sosAlerts.value = prefs.getBoolean("sos_alerts", true)
         _pttEnabled.value = prefs.getBoolean("ptt_enabled", true)
