@@ -68,8 +68,12 @@ class BridgeTest {
         val a = node("A")
         val relay = node("Relay")
         net.link(a.id.nodeId, relay.id.nodeId)
-        a.radio.advert(relay.id.nodeId, Cap.CHAT or Cap.RELAY or Cap.LORA)
-        until("relay noticed") { a.engine.isBridge(relay.id.nodeId) }
+        var tries = 0
+        while (!a.engine.isBridge(relay.id.nodeId) && tries++ < 60) {          // adverts repeat every second on a real phone
+            a.radio.advert(relay.id.nodeId, Cap.CHAT or Cap.RELAY or Cap.LORA)
+            delay(100)
+        }
+        assertTrue(a.engine.isBridge(relay.id.nodeId))
         assertFalse(a.engine.isBridge("deadbeef"))
     }
 
@@ -83,8 +87,14 @@ class BridgeTest {
         // the relay tells A: "far" is reachable, over a radio link
         val hello = Payloads.encodeHello(Payloads.Hello("Relay", Cap.CHAT or Cap.RELAY or Cap.LORA, listOf(RouteAd(far.nodeId, 2, true))))
         val pkt = MeshPacket(PacketType.HELLO, 0, 1, 0, ByteArray(8) { 7 }, relayId, a.id.nodeId, System.currentTimeMillis(), hello)
-        relayRadio.send(a.id.nodeId, Channel.CONTROL, pkt.encode())
-        until("route learned") { a.engine.isLoraPath(far.nodeId) }
+        // a real relay repeats its HELLO every 10 s; here it is repeated until A has processed the new link
+        var tries = 0
+        while (!a.engine.isLoraPath(far.nodeId) && tries++ < 60) {
+            val fresh = MeshPacket(PacketType.HELLO, 0, 1, 0, ByteArray(8) { tries.toByte() }, relayId, a.id.nodeId, System.currentTimeMillis(), hello)
+            relayRadio.send(a.id.nodeId, Channel.CONTROL, fresh.encode())
+            delay(100)
+        }
+        assertTrue("route with LoRa flag learned", a.engine.isLoraPath(far.nodeId))
         assertFalse(a.engine.isReachable(far.nodeId))                  // calls and file transfers need a live path
         assertEquals(SendResult.LORA_PATH, a.engine.sendContent(far.nodeId, Content.ofImage(ByteArray(300) { it.toByte() })))
         assertEquals(SendResult.LORA_PATH, a.engine.sendContent(far.nodeId, Content.ofVoice(0, 1000, ByteArray(0), ByteArray(200))))
