@@ -82,6 +82,7 @@ fun DebugScreen(vm: MainViewModel, myNodeId: String, modifier: Modifier = Modifi
             Mono("Relayed:    ${stats.relayed}")
             Mono("Delivered:  ${stats.delivered} (ACKs)")
             Mono("Synced out: ${stats.synced}")
+            Mono("Held back:  ${stats.suppressed} (relays skipped, neighbours already passed them on)")
             Mono("Dropped:    ${stats.dropped}")
             if (stats.lastDrop.isNotEmpty()) Mono("Last drop: ${stats.lastDrop}")
             Mono("Pending (store-and-forward): $pending")

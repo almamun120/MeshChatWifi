@@ -12,6 +12,7 @@ import com.meshchat.core.CallSignal
 import com.meshchat.core.CallSignaler
 import com.meshchat.core.CallUi
 import com.meshchat.core.FileSource
+import com.meshchat.core.FloodStatus
 import com.meshchat.core.LinkGate
 import com.meshchat.core.SessionKind
 import com.meshchat.core.StartResult
@@ -28,6 +29,7 @@ import com.meshchat.core.MeshEvent
 import com.meshchat.core.MeshStats
 import com.meshchat.core.Neighbor
 import com.meshchat.core.NodeIds
+import com.meshchat.core.Protocol
 import com.meshchat.core.Route
 import com.meshchat.core.SendResult
 import com.meshchat.core.TransportStatus
@@ -72,6 +74,8 @@ data class PeerUi(
     val reachable: Boolean,
     val canEncrypt: Boolean,   // we hold their public key
     val email: String = "",
+    /** The way to this person starts at a LoRa relay: messages may take minutes, pictures/calls will not cross the radio. */
+    val viaRelay: Boolean = false,
 )
 
 data class ChatRow(
@@ -289,7 +293,7 @@ class MeshRepository(private val context: Context) {
                 myEmail = user.email
 
                 val transport = BleTransport(appContext, identity.nodeId, Cap.ALL, scope)
-                val engine = MeshEngine(identity, { myName }, transport, store, scope, pttAllowed = { com.meshchat.data.AppSettings.pttEnabled.value }, emailProvider = { myEmail })
+                val engine = MeshEngine(identity, { myName }, com.meshchat.core.TtlClampTransport(transport) { if (com.meshchat.data.AppSettings.legacyCompat.value) 8 else Protocol.MAX_HOPS }, store, scope, pttAllowed = { com.meshchat.data.AppSettings.pttEnabled.value }, emailProvider = { myEmail }, floodSettings = { com.meshchat.data.AppSettings.floodSettings.value })
                 transportFlow.value = transport
                 engineFlow.value = engine
                 val signaler = object : CallSignaler {
@@ -448,6 +452,8 @@ class MeshRepository(private val context: Context) {
 
     val neighbors: Flow<List<Neighbor>> = engineFlow.flatMapLatest { it?.neighbors ?: flowOf(emptyList()) }
     val routes: Flow<List<Route>> = engineFlow.flatMapLatest { it?.routes ?: flowOf(emptyList()) }
+    /** Crowd density around this phone and the relay rules in force (null while the mesh is not running). */
+    val floodStatus: Flow<FloodStatus?> = engineFlow.flatMapLatest { it?.floodStatus ?: flowOf(null) }
     val mediaProgress: Flow<Map<String, Float>> = engineFlow.flatMapLatest { it?.mediaProgress ?: flowOf(emptyMap()) }
     val stats: Flow<MeshStats> = engineFlow.flatMapLatest { it?.stats ?: flowOf(MeshStats()) }
     val transportStatus: Flow<TransportStatus> = transportFlow.flatMapLatest { it?.status ?: flowOf(TransportStatus()) }
@@ -477,6 +483,7 @@ class MeshRepository(private val context: Context) {
                 reachable = reachable,
                 email = node?.email ?: "",
                 canEncrypt = node?.publicKey != null,
+                viaRelay = route != null && route.nextHop != id && (nbrById[route.nextHop]?.caps ?: 0) and Cap.LORA != 0,
             )
         }.filter { it.reachable || it.canEncrypt }
             .sortedWith(compareByDescending<PeerUi> { it.reachable }.thenBy { it.hops ?: 99 }.thenBy { it.name.lowercase() })

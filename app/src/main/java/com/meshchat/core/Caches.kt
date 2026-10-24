@@ -43,8 +43,11 @@ class RateLimiter(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bucket>?): Boolean = size > maxKeys
     }
 
+    fun allow(key: String): Boolean = allow(key, capacity, refillMs)
+
+    /** Same bucket, but with the limits supplied per call (the flood policy changes them as the crowd around us changes). */
     @Synchronized
-    fun allow(key: String): Boolean {
+    fun allow(key: String, capacity: Int, refillMs: Long): Boolean {
         val now = clock()
         val b = buckets.getOrPut(key) { Bucket(capacity.toDouble(), now) }
         b.tokens = minOf(capacity.toDouble(), b.tokens + (now - b.updated).toDouble() / refillMs)

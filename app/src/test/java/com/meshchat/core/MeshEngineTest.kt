@@ -94,18 +94,19 @@ class MeshEngineTest {
 
     @Test
     fun ttlLimitsPropagation() = runBlocking {
-        // A line of 10 nodes: the live FLOOD of an Announce (TTL 7) cannot reach beyond 7 transmissions.
+        // A long line: the live FLOOD of an Announce (TTL = DEFAULT_TTL) cannot reach beyond that many transmissions.
         // (Background inventory sync is switched off here; with it on, posts keep spreading hop by hop, still deduplicated.)
+        val reach = Protocol.DEFAULT_TTL
         val noSync = config.copy(syncOverrideMs = 10_000_000L)
-        val nodes = (0 until 10).map { node("N$it", noSync) }
-        for (i in 0 until 9) net.link(nodes[i].id.nodeId, nodes[i + 1].id.nodeId)
+        val nodes = (0 until reach + 3).map { node("N$it", noSync) }
+        for (i in 0 until reach + 2) net.link(nodes[i].id.nodeId, nodes[i + 1].id.nodeId)
         delay(500)
         nodes[0].engine.sendAnnounce("far away")
-        until { nodes[7].store.posts.isNotEmpty() }
+        until { nodes[reach].store.posts.isNotEmpty() }
         delay(800) // give any (wrong) further propagation time to appear
-        assertTrue("7 transmissions is the TTL limit", nodes[7].store.posts.isNotEmpty())
-        assertEquals("node 8 must NOT receive (TTL expired)", 0, nodes[8].store.posts.size)
-        assertEquals("node 9 must NOT receive (TTL expired)", 0, nodes[9].store.posts.size)
+        assertTrue("$reach transmissions is the TTL limit", nodes[reach].store.posts.isNotEmpty())
+        assertEquals("node ${reach + 1} must NOT receive (TTL expired)", 0, nodes[reach + 1].store.posts.size)
+        assertEquals("node ${reach + 2} must NOT receive (TTL expired)", 0, nodes[reach + 2].store.posts.size)
     }
 
     @Test
@@ -142,12 +143,13 @@ class MeshEngineTest {
 
     @Test
     fun postSpamIsRateLimited() = runBlocking {
+        // v2.00: the sender limits itself with the same rule the receivers apply (a burst, then a slow refill).
         val a = node("A"); val b = node("B")
         net.link(a.id.nodeId, b.id.nodeId)
         until { b.store.nodes[a.id.nodeId]?.publicKey != null }
-        repeat(12) { a.engine.sendAnnounce("spam $it") }
+        val results = (0 until 12).map { a.engine.sendAnnounce("spam $it") }
         delay(1200)
+        assertTrue("some posts must be refused locally", results.count { it == SendResult.RATE_LIMITED } >= 1)
         assertTrue("limiter should cap accepted posts", b.store.posts.size in 1..6)
-        assertTrue(b.engine.stats.value.dropped > 0)
     }
 }

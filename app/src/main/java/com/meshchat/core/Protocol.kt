@@ -17,7 +17,8 @@ enum class PacketType(val code: Int, val channel: Channel) {
     MEDIA(8, Channel.MSG),          // one chunk of an encrypted image/voice blob (routed unicast)
     MEDIA_NACK(9, Channel.MSG),     // receiver asks the sender to resend missing chunks
     CALL(10, Channel.MSG),
-    SOS(11, Channel.MSG);          // signed emergency broadcast (flooded, never stored); repeated by the sender until "I'm safe"          // encrypted session signalling (call / file-transfer offers, accept, Wi-Fi link info); never stored or queued
+    SOS(11, Channel.MSG),          // signed emergency broadcast (flooded, never stored); repeated by the sender until "I'm safe"
+    IDENTITY_REQ(12, Channel.MSG);  // v2.00: "send me your identity (name + key)". Routed to one node, never stored. The answer is a normal signed IDENTITY addressed to the asker.
 
     companion object {
         private val byCode = entries.associateBy { it.code }
@@ -29,6 +30,8 @@ object Cap {
     const val CHAT = 1
     const val RELAY = 2
     const val STORE = 4
+    /** A MeshChat LoRa Relay: a box that bridges this Bluetooth mesh to a LoRa radio mesh. Phones never set it. */
+    const val LORA = 8
     const val ALL = CHAT or RELAY or STORE
 }
 
@@ -40,8 +43,8 @@ object Protocol {
     const val VERSION = 1
     const val HEADER_SIZE = 31
     const val MAX_PACKET = 2048
-    const val DEFAULT_TTL = 7
-    const val MAX_HOPS = 8
+    const val DEFAULT_TTL = 15
+    const val MAX_HOPS = 16
     const val MAX_NAME_BYTES = 32
     const val MAX_POST_CHARS = 280
     const val MAX_PRIVATE_CHARS = 500

@@ -32,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -44,7 +45,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.meshchat.core.FloodMode
+import com.meshchat.core.FloodParams
+import com.meshchat.core.FloodPolicy
+import com.meshchat.core.FloodPreset
+import com.meshchat.core.FloodStatus
 import com.meshchat.data.AppSettings
+import kotlin.math.roundToInt
 
 @Composable
 fun SettingsScreen(vm: MainViewModel) {
@@ -204,6 +211,7 @@ fun SettingsScreen(vm: MainViewModel) {
             }
             SwitchRow("Vibrate on incoming call", vib, AppSettings::setCallVibrate)
         }
+        MeshTrafficSection(vm)
         Section("Push-to-talk") {
             SwitchRow("Allow push-to-talk to me", pttOn, AppSettings::setPttEnabled)
             Text("Off = short clips are dropped and live walkie-talkie requests are declined without ringing. Normal messages and calls are not affected.", style = MaterialTheme.typography.bodySmall)
@@ -265,6 +273,112 @@ private fun SwitchRow(label: String, value: Boolean, onChange: (Boolean) -> Unit
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, Modifier.weight(1f))
         Switch(checked = value, onCheckedChange = onChange)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------- Mesh traffic (v2.00)
+
+private val K_OPTIONS = listOf(0L, 2L, 3L, 4L, 5L)
+private val DELAY_OPTIONS = listOf(0L, 150L, 500L, 1_500L, 2_500L, 5_000L)
+private val POST_EVERY_OPTIONS = listOf(10_000L, 30_000L, 60_000L, 120_000L, 300_000L, 600_000L, 1_800_000L)
+private val IDENTITY_EVERY_OPTIONS = listOf(60_000L, 180_000L, 300_000L, 600_000L, 1_800_000L, 3_600_000L)
+
+private fun durText(ms: Long): String = when {
+    ms < 60_000L -> "${ms / 1000} s"
+    ms < 3_600_000L -> "${ms / 60_000} min"
+    else -> "${ms / 3_600_000} h"
+}
+
+private fun describe(st: FloodStatus): String {
+    val p = st.params
+    val quiet = if (p.suppressK == 0) "never" else "after ${p.suppressK} copies"
+    return "Around you: ${st.density} phone(s) (${st.band}). In force now: reach ${p.maxTtl} hop(s), stay quiet $quiet, " +
+        "random delay up to ${p.jitterMaxMs} ms, public posts ${p.postBurst} then 1 per ${durText(p.postEveryMs)}, " +
+        "identity ${if (p.identityFlood) "shared across the mesh every ${durText(p.identityEveryMs)}" else "given to direct neighbours only (others ask for it)"}."
+}
+
+@Composable
+private fun MeshTrafficSection(vm: MainViewModel) {
+    val s by AppSettings.floodSettings.collectAsState()
+    val status by vm.floodStatus.collectAsState()
+    val m = s.manual
+    fun update(p: FloodParams) = AppSettings.setFloodSettings(s.copy(manual = p))
+    Section("Mesh traffic (crowd control)") {
+        Text(
+            "Public posts and identities are passed on by every phone. In a crowd that would jam Bluetooth, so the rules tighten by themselves. " +
+                "Private messages, calls and SOS are not held back.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ChoiceButton("Automatic", s.mode == FloodMode.AUTO, Modifier.weight(1f)) { AppSettings.setFloodSettings(s.copy(mode = FloodMode.AUTO)) }
+            ChoiceButton("Manual", s.mode == FloodMode.MANUAL, Modifier.weight(1f)) { AppSettings.setFloodSettings(s.copy(mode = FloodMode.MANUAL)) }
+        }
+        status?.let { Text(describe(it), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline) }
+        if (s.mode == FloodMode.MANUAL) {
+            Text("Presets", fontWeight = FontWeight.Medium)
+            FloodPreset.entries.chunked(2).forEach { pair ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    pair.forEach { p ->
+                        ChoiceButton(p.label, FloodPolicy.preset(p) == m, Modifier.weight(1f)) { update(FloodPolicy.preset(p)) }
+                    }
+                }
+            }
+            FloodPreset.entries.firstOrNull { FloodPolicy.preset(it) == m }?.let {
+                Text(it.hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            }
+            HorizontalDivider()
+            LabeledSlider(
+                "Reach (hops)", "${m.maxTtl}", m.maxTtl.toFloat(), FloodPolicy.MIN_TTL.toFloat()..FloodPolicy.MAX_TTL.toFloat(), FloodPolicy.MAX_TTL - 2,
+            ) { update(m.copy(maxTtl = it.roundToInt())) }
+            Text("How many phones a public post or identity may be relayed through. Crowds: 2 to 3. Thin networks: 8 to 16.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            OptionSlider("Stay quiet after hearing", K_OPTIONS, m.suppressK.toLong(), { if (it == 0L) "never" else "$it copies" }) { update(m.copy(suppressK = it.toInt())) }
+            Text("If this many neighbours already passed a post on while this phone was waiting, it skips its own relay. Never = always relay.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            OptionSlider("Random delay before relaying (up to)", DELAY_OPTIONS, m.jitterMaxMs.toLong(), { if (it == 0L) "none" else "$it ms" }) {
+                update(m.copy(jitterMaxMs = it.toInt(), jitterMinMs = (it / 5).toInt()))
+            }
+            HorizontalDivider()
+            LabeledSlider("Public posts: burst", "${m.postBurst}", m.postBurst.toFloat(), 1f..FloodPolicy.MAX_BURST.toFloat(), FloodPolicy.MAX_BURST - 2) { update(m.copy(postBurst = it.roundToInt())) }
+            OptionSlider("Then one more post every", POST_EVERY_OPTIONS, m.postEveryMs, { durText(it) }) { update(m.copy(postEveryMs = it)) }
+            Text("Limits your own public posts and the posts this phone is willing to relay from each person.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            HorizontalDivider()
+            SwitchRow("Share identities across the mesh", m.identityFlood) { update(m.copy(identityFlood = it)) }
+            Text("Off = your name and key go to direct neighbours only. Anyone else who wants to write to you asks for them first (takes a few seconds).", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            if (m.identityFlood) OptionSlider("Repeat my identity every", IDENTITY_EVERY_OPTIONS, m.identityEveryMs, { durText(it) }) { update(m.copy(identityEveryMs = it)) }
+        }
+        HorizontalDivider()
+        val legacy by AppSettings.legacyCompat.collectAsState()
+        SwitchRow("Work with older MeshChat versions (1.x)", legacy, AppSettings::setLegacyCompat)
+        Text(
+            if (legacy) "On: messages travel at most 8 hops, so phones that still have version 1.x keep working in the same mesh. Turn it off when everybody has updated, to allow up to 16 hops."
+            else "Off: up to 16 hops. Phones with version 1.x cannot read packets that travelled with more than 8 hops left, so they will miss some messages.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+        )
+    }
+}
+
+@Composable
+private fun ChoiceButton(label: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    if (selected) Button(onClick = onClick, modifier = modifier) { Text(label) }
+    else OutlinedButton(onClick = onClick, modifier = modifier) { Text(label) }
+}
+
+@Composable
+private fun LabeledSlider(label: String, valueText: String, value: Float, range: ClosedFloatingPointRange<Float>, steps: Int, onChange: (Float) -> Unit) {
+    Column {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, Modifier.weight(1f))
+            Text(valueText, fontWeight = FontWeight.Medium)
+        }
+        Slider(value = value.coerceIn(range.start, range.endInclusive), onValueChange = onChange, valueRange = range, steps = maxOf(steps, 0))
+    }
+}
+
+/** A slider that snaps to the listed values. */
+@Composable
+private fun OptionSlider(label: String, options: List<Long>, current: Long, format: (Long) -> String, onPick: (Long) -> Unit) {
+    val idx = options.indexOfFirst { it >= current }.let { if (it < 0) options.lastIndex else it }
+    LabeledSlider(label, format(options[idx]), idx.toFloat(), 0f..options.lastIndex.toFloat(), options.size - 2) {
+        onPick(options[it.roundToInt().coerceIn(0, options.lastIndex)])
     }
 }
 

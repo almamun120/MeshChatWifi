@@ -87,6 +87,7 @@ fun sendResultMessage(r: SendResult): String? = when (r) {
     SendResult.QUEUE_FULL -> "Too many photos/voice messages are waiting to be delivered. Wait for some to finish."
     SendResult.BAD_MEDIA -> "That file could not be prepared for sending"
     SendResult.NO_GROUP -> "This group no longer exists, or you are not a member of it any more"
+    SendResult.RATE_LIMITED -> "Public posts are limited to keep the mesh usable. Try again in a little while (Settings > Mesh traffic)."
 }
 
 // ---------------------------------------------------------------------------------------------- Announce
@@ -249,6 +250,7 @@ fun ChatScreen(vm: MainViewModel, peerId: String, onMessage: (String) -> Unit, m
     Column(modifier.fillMaxSize().imePadding()) {
         val info = when {
             isGroup -> "Group • ${group?.members?.split(',')?.size ?: 0} members • end-to-end encrypted, sent to each member separately"
+            peer?.reachable == true && peer.viaRelay -> "${hopsText(peer.hops)} away • through a LoRa relay: text messages may take a few minutes, photos and calls will not get through • end-to-end encrypted"
             peer?.reachable == true -> "${hopsText(peer.hops)} away • end-to-end encrypted"
             else -> "Not in range — messages, photos and voice are saved here and delivered automatically when this person is reachable"
         }

@@ -155,6 +155,11 @@ class FakeTransport(val id: String, private val net: FakeNet) : MeshTransport {
         return true
     }
 
+    /** Tests: pretend an advertisement from [peer] with these capability bits was heard. */
+    fun advert(peer: String, caps: Int) {
+        _events.tryEmit(TransportEvent.PeerSeen(peer, -60, caps))
+    }
+
     fun up(peer: String) {
         links.add(peer)
         _events.tryEmit(TransportEvent.LinkUp(peer, true))

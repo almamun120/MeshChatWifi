@@ -19,6 +19,9 @@ class NeighborTable(private val timeoutMs: Long) {
         map[id] = Neighbor(id, smoothed, caps, now, old?.linked ?: false)
     }
 
+    @Synchronized
+    fun capsOf(id: String): Int = map[id]?.caps ?: 0
+
     /** Any frame from a linked peer proves it is alive. */
     @Synchronized
     fun touch(id: String, now: Long) {
@@ -40,6 +43,10 @@ class NeighborTable(private val timeoutMs: Long) {
             if (!n.linked && now - n.lastSeen > timeoutMs) it.remove()
         }
     }
+
+    /** Phones heard around us right now (linked or just seen in a scan). Feeds the flood policy's crowd-density estimate. */
+    @Synchronized
+    fun count(): Int = map.size
 
     @Synchronized
     fun snapshot(): List<Neighbor> = map.values.sortedByDescending { if (it.rssi == 0) -999 else it.rssi }

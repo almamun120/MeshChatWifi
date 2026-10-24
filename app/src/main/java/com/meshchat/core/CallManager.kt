@@ -70,6 +70,8 @@ data class CallConfig(
     val retryMs: Long = 3_000,
     val poorAfterMs: Long = 4_000,
     val lostAfterMs: Long = 20_000,
+    /** Walkie-talkie sessions are silent between presses and people walk around, so they get a much longer grace period. */
+    val pttLostAfterMs: Long = 60_000,
     val endedLingerMs: Long = 1_800,
     val monitorMs: Long = 500,
     /** Callee joins the caller's Wi-Fi Direct group while the phone is still ringing, so Answer connects in a second or two. */
@@ -449,7 +451,7 @@ class CallManager(
     private suspend fun monitor(s: Session) {
         while (scope.isActive && phaseOf(s) == CallPhase.ACTIVE) {
             val age = s.linkImpl?.lastPacketAgeMs() ?: 0L
-            if (age > config.lostAfterMs) {
+            if (age > (if (s.ptt) config.pttLostAfterMs else config.lostAfterMs)) {
                 finish(s, CallEnd.LOST, CallSignalType.END)
                 return
             }

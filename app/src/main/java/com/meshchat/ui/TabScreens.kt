@@ -212,6 +212,7 @@ private fun PeerRow(p: PeerUi, now: Long, onDelete: (() -> Unit)?, onClick: () -
                 append(hopsText(p.hops))
                 append(" • ")
                 append(if (p.reachable) "Online" else "Last seen ${agoText(now, p.lastSeen)}")
+                if (p.viaRelay) append(" • via LoRa relay")
                 if (p.rssi != null) append(" • ${p.rssi} dBm")
             }
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

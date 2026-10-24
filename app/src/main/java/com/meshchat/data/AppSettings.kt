@@ -3,6 +3,10 @@ package com.meshchat.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
+import com.meshchat.core.FloodMode
+import com.meshchat.core.FloodParams
+import com.meshchat.core.FloodPolicy
+import com.meshchat.core.FloodSettings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -64,6 +68,11 @@ object AppSettings {
         private set
     fun setSosIncludeLocation(v: Boolean) { sosIncludeLocation = v; prefs.edit().putBoolean("sos_include_location", v).apply() }
 
+    private val _legacyCompat = MutableStateFlow(true)
+    /** On = never send a hop limit above 8, so MeshChat 1.x phones (which drop anything higher) keep working in the same mesh. Off = up to 16 hops. */
+    val legacyCompat: StateFlow<Boolean> = _legacyCompat.asStateFlow()
+    fun setLegacyCompat(v: Boolean) { _legacyCompat.value = v; prefs.edit().putBoolean("legacy_compat", v).apply() }
+
     private val _pttEnabled = MutableStateFlow(true)
     /** Master switch for receiving push-to-talk (short clips and live sessions). Off = declined silently. */
     val pttEnabled: StateFlow<Boolean> = _pttEnabled.asStateFlow()
@@ -77,6 +86,22 @@ object AppSettings {
     val pttAutoAnswer: StateFlow<Boolean> = _pttAutoAnswer.asStateFlow()
     fun setPttAutoAnswer(v: Boolean) { _pttAutoAnswer.value = v; prefs.edit().putBoolean("ptt_autoanswer", v).apply() }
 
+    private val _flood = MutableStateFlow(FloodSettings())
+    /** v2.00 mesh traffic control: automatic (by how crowded it is around this phone) or the manual values below. */
+    val floodSettings: StateFlow<FloodSettings> = _flood.asStateFlow()
+    fun setFloodSettings(s: FloodSettings) {
+        val clean = s.copy(manual = FloodPolicy.sanitize(s.manual))
+        _flood.value = clean
+        val m = clean.manual
+        prefs.edit()
+            .putString("flood_mode", clean.mode.name)
+            .putInt("flood_ttl", m.maxTtl).putInt("flood_k", m.suppressK)
+            .putInt("flood_jmin", m.jitterMinMs).putInt("flood_jmax", m.jitterMaxMs)
+            .putInt("flood_burst", m.postBurst).putLong("flood_post_every", m.postEveryMs)
+            .putBoolean("flood_id_flood", m.identityFlood).putLong("flood_id_every", m.identityEveryMs)
+            .apply()
+    }
+
     fun init(ctx: Context) {
         prefs = ctx.applicationContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
         _downloadTree.value = prefs.getString("download_tree", null)
@@ -89,11 +114,24 @@ object AppSettings {
         _sosTone.value = if (prefs.contains("sos_tone")) prefs.getString("sos_tone", "") else null
         announceClearedAt = prefs.getLong("announce_cleared_at", 0L)
         _sosAlerts.value = prefs.getBoolean("sos_alerts", true)
+        _legacyCompat.value = prefs.getBoolean("legacy_compat", true)
         _pttEnabled.value = prefs.getBoolean("ptt_enabled", true)
         _pttAutoPlay.value = prefs.getBoolean("ptt_autoplay", true)
         _pttAutoAnswer.value = prefs.getBoolean("ptt_autoanswer", false)
         _sosActive.value = prefs.getBoolean("sos_active", false)
         sosIncludeLocation = prefs.getBoolean("sos_include_location", false)
+        val d = FloodSettings().manual
+        _flood.value = FloodSettings(
+            mode = runCatching { FloodMode.valueOf(prefs.getString("flood_mode", FloodMode.AUTO.name) ?: FloodMode.AUTO.name) }.getOrDefault(FloodMode.AUTO),
+            manual = FloodPolicy.sanitize(
+                FloodParams(
+                    maxTtl = prefs.getInt("flood_ttl", d.maxTtl), suppressK = prefs.getInt("flood_k", d.suppressK),
+                    jitterMinMs = prefs.getInt("flood_jmin", d.jitterMinMs), jitterMaxMs = prefs.getInt("flood_jmax", d.jitterMaxMs),
+                    postBurst = prefs.getInt("flood_burst", d.postBurst), postEveryMs = prefs.getLong("flood_post_every", d.postEveryMs),
+                    identityFlood = prefs.getBoolean("flood_id_flood", d.identityFlood), identityEveryMs = prefs.getLong("flood_id_every", d.identityEveryMs),
+                ),
+            ),
+        )
     }
 
     fun setDownloadTree(uri: Uri?) {

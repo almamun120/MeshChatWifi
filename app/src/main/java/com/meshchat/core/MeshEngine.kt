@@ -27,7 +27,12 @@ data class MeshConfig(
     val pendingTtlMs: Long = 24 * 3_600_000L,
     val retryBackoffMs: List<Long> = listOf(8_000L, 16_000L, 32_000L, 64_000L, 120_000L),
     val maxAttempts: Int = 5,
-    val identityIntervalMs: Long = 60_000,
+    /** Messages whose route leads through a LoRa relay are retried this many times slower: the radio side is slow and the relay retries by itself. */
+    val bridgeBackoffFactor: Int = 4,
+    /** Tests only: when > 0 replaces the identity interval chosen by [FloodPolicy]. */
+    val identityIntervalMs: Long = 0,
+    /** How long sending to someone whose key we do not have yet waits for the identity answer before giving up with NO_KEY. */
+    val keyWaitMs: Long = 4_000,
     val inventoryLimit: Int = 60,
     val wantLimit: Int = 30,
     val wantServeLimit: Int = 20,
@@ -75,6 +80,8 @@ data class MeshStats(
     val dropped: Int = 0,
     val delivered: Int = 0,
     val synced: Int = 0,
+    /** Relays cancelled because enough neighbours had already passed the message on (flood control). */
+    val suppressed: Int = 0,
     val lastDrop: String = "",
 )
 
@@ -91,7 +98,7 @@ sealed interface MeshEvent {
     class GroupGone(val groupId: String, val name: String, val deleted: Boolean) : MeshEvent
 }
 
-enum class SendResult { OK, EMPTY, TOO_LONG, NO_KEY, SELF, NOT_RUNNING, QUEUE_FULL, BAD_MEDIA, NO_GROUP }
+enum class SendResult { OK, EMPTY, TOO_LONG, NO_KEY, SELF, NOT_RUNNING, QUEUE_FULL, BAD_MEDIA, NO_GROUP, RATE_LIMITED }
 
 /**
  * The mesh brain. Pure Kotlin + coroutines (no Android classes), so it is unit-testable on the JVM.
@@ -112,12 +119,15 @@ class MeshEngine(
     private val pttAllowed: () -> Boolean = { true },
     /** Optional e-mail shown to others next to the name (signed with the identity). */
     private val emailProvider: () -> String = { "" },
+    /** v2.00: how far and how eagerly this phone relays broadcasts (automatic by crowd density, or fixed by the user). */
+    private val floodSettings: () -> FloodSettings = { FloodSettings() },
 ) {
     val myId: String = identity.nodeId
 
     private val rng = SecureRandom()
     private val dup = DuplicateCache(config.dupCapacity, config.dupTtlMs, clock)
     private val postLimiter = RateLimiter(config.postRateCapacity, config.postRefillMs, clock = clock)
+    private val idReqLimiter = RateLimiter(3, 10_000L, clock = clock)
     private val neighborTable = NeighborTable(config.neighborTimeoutMs)
     private val routingTable = RoutingTable(config.routeTtlMs)
     private val blocked: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -144,6 +154,24 @@ class MeshEngine(
 
     @Volatile
     private var mode = DiscoveryMode.NORMAL
+
+    // ---- flood control (v2.00)
+    private val density = DensityTracker()
+
+    @Volatile
+    private var flood: FloodParams = FloodPolicy.effective(floodSettings(), 0)
+
+    private val _floodStatus = MutableStateFlow(FloodStatus(0, FloodPolicy.band(0), floodSettings().mode, flood))
+    /** Crowd density around this phone and the relay rules in force right now (shown in Settings). */
+    val floodStatus: StateFlow<FloodStatus> = _floodStatus.asStateFlow()
+
+    private class RelayWait { var heard = 1 }                              // the copy we just got counts as the first
+    private val relayWait = HashMap<String, RelayWait>()                   // guarded by itself: broadcasts waiting out their random delay
+    private val idReqSent = HashMap<String, Long>()                        // guarded by itself: when we last asked for a node's identity
+
+    /** A private message for us whose sender's key we do not have yet. Kept briefly and opened as soon as the identity arrives (relays drop the sender's retries as duplicates, so waiting for one would not work). */
+    private class Parked(val from: String, val pkt: MeshPacket, val at: Long)
+    private val parked = LinkedHashMap<String, Parked>()                   // guarded by itself, at most PARK_MAX entries
 
     private val _neighbors = MutableStateFlow<List<Neighbor>>(emptyList())
     val neighbors: StateFlow<List<Neighbor>> = _neighbors.asStateFlow()
@@ -201,11 +229,13 @@ class MeshEngine(
         val t = text.trim()
         if (t.isEmpty()) return SendResult.EMPTY
         if (t.length > Protocol.MAX_POST_CHARS) return SendResult.TOO_LONG
+        val fp = flood
+        if (!postLimiter.allow(myId, fp.postBurst, fp.postEveryMs)) return SendResult.RATE_LIMITED
         val name = nameProvider()
         val pkt = newPacket(
             PacketType.ANNOUNCE, NodeIds.BROADCAST,
             Payloads.encodeAnnounce(Payloads.Announce(name, t)),
-            Protocol.DEFAULT_TTL, sign = true,
+            minOf(Protocol.DEFAULT_TTL, fp.maxTtl), sign = true,
         )
         dup.checkAndAdd(pkt.key)
         val now = clock()
@@ -263,7 +293,7 @@ class MeshEngine(
         val alert = SosAlert(pkt.src, p.name, p.active, p.battery, p.location, minOf(pkt.timestamp, now), pkt.hops + 1, verified)
         _events.tryEmit(MeshEvent.SosReceived(alert))
         _stats.update { it.copy(received = it.received + 1) }
-        forwardBroadcast(pkt, from)
+        forwardBroadcast(pkt, from, urgent = true)
     }
 
     suspend fun sendPrivate(peerId: String, text: String): SendResult = sendContent(peerId, Content.ofText(text))
@@ -284,7 +314,7 @@ class MeshEngine(
             if (t.isEmpty() || t.length > Protocol.MAX_PRIVATE_CHARS) null else content.copyEnvelope().let { Content(ContentKind.TEXT, text = t, ttlSec = it.ttlSec, replyToId = it.replyToId, replyQuote = it.replyQuote, groupId = it.groupId, logicalId = it.logicalId) }
         } else content
 
-    private suspend fun sendInternal(peerId: String, content: Content, save: Boolean): SendResult {
+    private suspend fun sendInternal(peerId: String, content: Content, save: Boolean, waitForKey: Boolean = true): SendResult {
         if (peerId == myId) return SendResult.SELF
         if (content.kind == ContentKind.TEXT) {
             val t = content.text.trim()
@@ -292,7 +322,7 @@ class MeshEngine(
             if (t.length > Protocol.MAX_PRIVATE_CHARS) return SendResult.TOO_LONG
         }
         val c = normalized(content)!!
-        val peerKey = store.getNode(peerId)?.publicKey ?: return SendResult.NO_KEY
+        val peerKey = store.getNode(peerId)?.publicKey ?: fetchPeerKey(peerId, waitForKey) ?: return SendResult.NO_KEY
         val plain = ContentCodec.encode(c) ?: return SendResult.BAD_MEDIA
         val id = newMsgId()
         val idHex = Hex.encode(id)
@@ -333,7 +363,7 @@ class MeshEngine(
         var firstError = SendResult.NO_KEY
         for (m in g.members) {
             if (m == myId) continue
-            val r = sendInternal(m, c, save = false)
+            val r = sendInternal(m, c, save = false, waitForKey = false)
             if (r == SendResult.OK) any = true else firstError = r
         }
         if (!any) return firstError
@@ -447,6 +477,15 @@ class MeshEngine(
     }
 
     /** True when a route to [peerId] exists right now (a call or transfer needs a live path for its signalling). */
+    /** True when [peerId] is a LoRa relay (it says so in its advertisement). */
+    fun isBridge(peerId: String): Boolean = neighborTable.capsOf(peerId) and Cap.LORA != 0
+
+    /** True when the way to [peerId] starts at a LoRa relay: delivery may be slow, and big transfers will not make it across the radio. */
+    fun isViaBridge(peerId: String): Boolean {
+        val hop = routingTable.lookup(peerId, clock())?.nextHop ?: return false
+        return hop != peerId && isBridge(hop)
+    }
+
     fun isReachable(peerId: String): Boolean =
         routingTable.lookup(peerId, clock())?.nextHop?.let { it in transport.linkedPeers() } == true
 
@@ -506,12 +545,13 @@ class MeshEngine(
             neighborTable.expire(now)
             routingTable.expire(now)
             publish(now)
+            updateFlood()
             try {
                 if (now - lastHello >= config.helloIntervalMs(mode)) {
                     lastHello = now
                     for (p in transport.linkedPeers()) scope.launch { sendHello(p) }
                 }
-                if (now - lastIdentity >= config.identityIntervalMs) {
+                if (now - lastIdentity >= (if (config.identityIntervalMs > 0) config.identityIntervalMs else flood.identityEveryMs)) {
                     lastIdentity = now
                     broadcastIdentity()
                 }
@@ -645,6 +685,7 @@ class MeshEngine(
     }
 
     private suspend fun sendInventory(peer: String) {
+        if (isBridge(peer)) return          // a LoRa relay does not take part in post sync (it carries posts over the radio itself)
         val refs = store.recentPostRefs(config.inventoryLimit)
         if (refs.isEmpty()) return
         val pkt = newPacket(PacketType.SYNC_INV, peer, Payloads.encodeRefs(refs), 1, sign = false)
@@ -691,6 +732,7 @@ class MeshEngine(
 
     private suspend fun onRoutable(from: String, pkt: MeshPacket) {
         if (dup.checkAndAdd(pkt.key)) {
+            noteHeardCopy(pkt.key)
             if (pkt.type == PacketType.PRIVATE && pkt.dst == myId) {
                 // Our ACK probably got lost. Re-ACK so the sender stops retrying; never re-deliver to the UI.
                 sendAck(pkt.src, pkt.msgId)
@@ -708,6 +750,7 @@ class MeshEngine(
             PacketType.MEDIA_NACK -> onNack(from, pkt)
             PacketType.CALL -> onCall(from, pkt)
             PacketType.SOS -> onSos(from, pkt)
+            PacketType.IDENTITY_REQ -> onIdentityReq(from, pkt)
             else -> drop("unexpected type")
         }
     }
@@ -733,7 +776,108 @@ class MeshEngine(
             return
         }
         store.upsertNodeIdentity(pkt.src, id.name, id.publicKey, clock(), id.email)
+        releaseParked(pkt.src)
+        when {
+            pkt.isBroadcast -> forwardBroadcast(pkt, from)
+            pkt.dst != myId -> forwardLookup(pkt, from)         // an answer to somebody else's identity request: pass it along
+        }
+    }
+
+    private fun park(from: String, pkt: MeshPacket) {
+        val now = clock()
+        synchronized(parked) {
+            parked.entries.removeIf { now - it.value.at > PARK_MS }
+            while (parked.size >= PARK_MAX) parked.remove(parked.keys.first())
+            parked[pkt.key] = Parked(from, pkt, now)
+        }
+    }
+
+    private suspend fun releaseParked(src: String) {
+        val ready = synchronized(parked) {
+            if (parked.isEmpty()) return
+            val out = ArrayList<Parked>()
+            val it = parked.entries.iterator()
+            while (it.hasNext()) {
+                val e = it.next().value
+                if (e.pkt.src == src) { out.add(e); it.remove() }
+            }
+            out
+        }
+        for (p in ready) onRoutable(p.from, p.pkt)
+    }
+
+    /** "Send me your identity": answer with a signed IDENTITY addressed to the asker. Requests for somebody else are passed on. */
+    private suspend fun onIdentityReq(from: String, pkt: MeshPacket) {
+        if (pkt.dst != myId) {
+            forwardLookup(pkt, from)
+            return
+        }
+        if (!idReqLimiter.allow(pkt.src)) {
+            drop("identity request: rate limit")
+            return
+        }
+        val reply = identityPacket(Protocol.MAX_HOPS, dst = pkt.src)
+        dup.checkAndAdd(reply.key)
+        sendLookup(reply)
+    }
+
+    /**
+     * Identity request / answer meant for somebody else: along a route when we know one, otherwise as a short flood
+     * with the usual delay and suppression. Never parked in the pending table (a late answer is useless).
+     */
+    private suspend fun forwardLookup(pkt: MeshPacket, from: String) {
+        if (pkt.ttl <= 1) {
+            drop("ttl expired")
+            return
+        }
+        val f = pkt.forwarded()
+        val r = routingTable.lookup(f.dst, clock())
+        if (r != null && r.nextHop != from && r.nextHop in transport.linkedPeers()) {
+            if (transport.send(r.nextHop, f.type.channel, f.encode())) _stats.update { it.copy(relayed = it.relayed + 1) }
+            return
+        }
         forwardBroadcast(pkt, from)
+    }
+
+    /** First hop of a request/answer that starts here: the route if there is one, else every neighbour, with a short reach. */
+    private suspend fun sendLookup(pkt: MeshPacket) {
+        val r = routingTable.lookup(pkt.dst, clock())
+        if (r != null && r.nextHop in transport.linkedPeers() && transport.send(r.nextHop, pkt.type.channel, pkt.encode())) return
+        val out = pkt.withTtl(maxOf(2, flood.maxTtl).coerceAtMost(Protocol.MAX_HOPS))
+        val bytes = out.encode()
+        for (p in transport.linkedPeers()) scope.launch { transport.send(p, out.type.channel, bytes) }
+    }
+
+    /** Asks [target] for its identity (rate limited per target). */
+    private suspend fun requestIdentity(target: String) {
+        if (target == myId || !NodeIds.isValid(target) || GroupIds.isGroup(target)) return
+        val now = clock()
+        synchronized(idReqSent) {
+            val last = idReqSent[target]
+            if (last != null && now - last < 8_000) return
+            idReqSent[target] = now
+            if (idReqSent.size > 200) idReqSent.entries.removeIf { now - it.value > 60_000 }
+        }
+        val req = newPacket(PacketType.IDENTITY_REQ, target, ByteArray(0), Protocol.MAX_HOPS, sign = false)
+        dup.checkAndAdd(req.key)
+        MeshLog.log("identity: asking ${target.take(8)} for its key")
+        sendLookup(req)
+        // Our own identity goes along, so they can read what we are about to send without a second round trip.
+        val mine = identityPacket(Protocol.MAX_HOPS, dst = target)
+        dup.checkAndAdd(mine.key)
+        sendLookup(mine)
+    }
+
+    /** The key of [peerId] if we do not have it yet: ask for it and (when [wait]) give the answer a few seconds to arrive. */
+    private suspend fun fetchPeerKey(peerId: String, wait: Boolean): ByteArray? {
+        requestIdentity(peerId)
+        if (!wait) return null
+        val until = clock() + config.keyWaitMs
+        while (clock() < until) {
+            store.getNode(peerId)?.publicKey?.let { return it }
+            delay(150)
+        }
+        return store.getNode(peerId)?.publicKey
     }
 
     private suspend fun onAnnounce(from: String, pkt: MeshPacket) {
@@ -747,7 +891,7 @@ class MeshEngine(
             drop("unsigned announce")
             return
         }
-        if (!postLimiter.allow(pkt.src)) {
+        if (!postLimiter.allow(pkt.src, flood.postBurst, flood.postEveryMs)) {
             drop("spam: rate limit")
             return
         }
@@ -780,8 +924,10 @@ class MeshEngine(
         }
         val senderKey = store.getNode(pkt.src)?.publicKey
         if (senderKey == null) {
-            // Allow a later retry to be processed once the sender's IDENTITY has arrived.
+            // Allow a later retry to be processed once the sender's IDENTITY has arrived (ask for it now: nobody floods it in a crowd).
             dup.forget(pkt.key)
+            park(from, pkt)
+            requestIdentity(pkt.src)
             drop("private: sender key unknown yet")
             return
         }
@@ -812,6 +958,7 @@ class MeshEngine(
         val senderKey = store.getNode(pkt.src)?.publicKey
         if (senderKey == null) {
             dup.forget(pkt.key)                // the next retry may arrive after the sender's IDENTITY
+            requestIdentity(pkt.src)
             drop("call: sender key unknown yet")
             return
         }
@@ -1083,13 +1230,62 @@ class MeshEngine(
 
     // ------------------------------------------------------------------ forwarding
 
-    private fun forwardBroadcast(pkt: MeshPacket, from: String) {
+    /** Re-reads the crowd density and the user's flood settings (once a second). */
+    private fun updateFlood() {
+        val d = density.update(neighborTable.count())
+        val s = floodSettings()
+        val p = FloodPolicy.effective(s, d)
+        flood = p
+        _floodStatus.value = FloodStatus(d, FloodPolicy.band(d), s.mode, p)
+    }
+
+    /** Another copy of a broadcast we are about to relay was heard: one more reason to stay quiet. */
+    private fun noteHeardCopy(key: String) {
+        synchronized(relayWait) { relayWait[key]?.let { it.heard++ } }
+    }
+
+    /**
+     * Relays a broadcast with the v2.00 flood control:
+     *  1. its hop budget is cut to this phone's limit (crowded places: 2-3 hops are plenty),
+     *  2. identities are not relayed at all where [FloodParams.identityFlood] is off (neighbours only),
+     *  3. the relay waits a random moment, and is cancelled when enough other phones passed it on meanwhile.
+     * [urgent] (SOS) skips 1 and 3, keeping only a very short random delay so neighbours do not all transmit together.
+     */
+    private fun forwardBroadcast(pkt: MeshPacket, from: String, urgent: Boolean = false) {
         if (pkt.ttl <= 1) return
-        val f = pkt.forwarded()
+        val fp = flood
+        if (!urgent && pkt.type == PacketType.IDENTITY && pkt.isBroadcast && !fp.identityFlood) return
+        var f = pkt.forwarded()
+        if (!urgent && f.ttl > fp.maxTtl) f = f.withTtl(fp.maxTtl)
+        val jitterMax = if (urgent) minOf(fp.jitterMaxMs, 200) else fp.jitterMaxMs
+        val jitterMin = minOf(fp.jitterMinMs, jitterMax)
+        val k = if (urgent) 0 else fp.suppressK
+        if (jitterMax <= 0) {
+            relayNow(f, from, pkt.src)
+            return
+        }
+        val key = pkt.key
+        synchronized(relayWait) {
+            if (relayWait.containsKey(key)) return
+            relayWait[key] = RelayWait()
+        }
+        val wait = if (jitterMax > jitterMin) jitterMin + rng.nextInt(jitterMax - jitterMin + 1) else jitterMin
+        scope.launch {
+            delay(wait.toLong())
+            val heard = synchronized(relayWait) { relayWait.remove(key)?.heard } ?: return@launch
+            if (k > 0 && heard >= k) {
+                _stats.update { it.copy(suppressed = it.suppressed + 1) }
+                return@launch
+            }
+            relayNow(f, from, pkt.src)
+        }
+    }
+
+    private fun relayNow(f: MeshPacket, from: String, origin: String) {
         val bytes = f.encode()
         var count = 0
         for (p in transport.linkedPeers()) {
-            if (p == from || p == pkt.src) continue
+            if (p == from || p == origin) continue
             count++
             scope.launch { transport.send(p, f.type.channel, bytes) }
         }
@@ -1161,7 +1357,8 @@ class MeshEngine(
                 val route = routingTable.lookup(rec.dst, now) ?: continue
                 if (route.nextHop !in transport.linkedPeers()) continue
                 if (rec.attempts > 0) {
-                    val wait = config.retryBackoffMs[minOf(rec.attempts - 1, config.retryBackoffMs.size - 1)]
+                    var wait = config.retryBackoffMs[minOf(rec.attempts - 1, config.retryBackoffMs.size - 1)]
+                    if (isBridge(route.nextHop) && rec.dst != route.nextHop) wait *= config.bridgeBackoffFactor
                     if (now - rec.lastAttempt < wait) continue
                     if (rec.attempts >= config.maxAttempts) {
                         store.deletePending(rec.key)
@@ -1196,7 +1393,9 @@ class MeshEngine(
     suspend fun refreshIdentity() = broadcastIdentity()
 
     private suspend fun broadcastIdentity() {
-        val pkt = identityPacket(Protocol.DEFAULT_TTL)
+        val fp = flood
+        // Crowded places: tell direct neighbours only (ttl 1). Anybody else who needs our key asks for it (IDENTITY_REQ).
+        val pkt = identityPacket(if (fp.identityFlood) minOf(Protocol.DEFAULT_TTL, fp.maxTtl) else 1)
         dup.checkAndAdd(pkt.key)
         val bytes = pkt.encode()
         for (p in transport.linkedPeers()) scope.launch { transport.send(p, pkt.type.channel, bytes) }
@@ -1207,14 +1406,19 @@ class MeshEngine(
         transport.send(peer, pkt.type.channel, pkt.encode())
     }
 
-    private fun identityPacket(ttl: Int): MeshPacket =
+    private fun identityPacket(ttl: Int, dst: String = NodeIds.BROADCAST): MeshPacket =
         newPacket(
-            PacketType.IDENTITY, NodeIds.BROADCAST,
+            PacketType.IDENTITY, dst,
             Payloads.encodeIdentity(Payloads.Identity(Cap.ALL, nameProvider(), identity.publicBytes, emailProvider())),
             ttl, sign = true,
         )
 
     // ------------------------------------------------------------------ helpers
+
+    private companion object {
+        const val PARK_MAX = 32
+        const val PARK_MS = 60_000L
+    }
 
     private fun newMsgId(): ByteArray = ByteArray(8).also { rng.nextBytes(it) }
 

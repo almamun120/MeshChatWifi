@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.meshchat.MeshChatApp
 import com.meshchat.core.CallUi
+import com.meshchat.core.FloodStatus
 import com.meshchat.core.StartResult
 import com.meshchat.core.TransferUi
 import com.meshchat.share.MediaItem
@@ -116,6 +117,7 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     val neighbors: StateFlow<List<Neighbor>> = repo.neighbors.state(emptyList())
     val routes: StateFlow<List<Route>> = repo.routes.state(emptyList())
     val stats: StateFlow<MeshStats> = repo.stats.state(MeshStats())
+    val floodStatus: StateFlow<FloodStatus?> = repo.floodStatus.state(null)
     val transport: StateFlow<TransportStatus> = repo.transportStatus.state(TransportStatus())
     val pendingCount: StateFlow<Int> = repo.pendingCount.state(0)
     val mediaProgress: StateFlow<Map<String, Float>> = repo.mediaProgress.state(emptyMap())

@@ -281,12 +281,23 @@ class WebRtcLink(ctx: Context) : CallLink {
     override fun lastPacketAgeMs(): Long {
         val p = pc ?: return 0
         p.getStats { report: RTCStatsReport ->
-            var packets = 0L
+            // Liveness = ANY traffic from the other phone, not just audio. Push-to-talk keeps both microphones muted
+            // between presses, so there may be no RTP for a long time while the link is perfectly healthy. ICE
+            // consent checks (STUN requests/responses every few seconds) prove the radio path is still alive.
+            var activity = 0L
             for (st in report.statsMap.values) {
-                if (st.type == "inbound-rtp") (st.members["packetsReceived"] as? Number)?.let { packets += it.toLong() }
+                when (st.type) {
+                    "inbound-rtp" -> (st.members["packetsReceived"] as? Number)?.let { activity += it.toLong() }
+                    "candidate-pair" -> {
+                        if (st.members["state"] == "succeeded" || st.members["nominated"] == true) {
+                            (st.members["responsesReceived"] as? Number)?.let { activity += it.toLong() }
+                            (st.members["requestsReceived"] as? Number)?.let { activity += it.toLong() }
+                        }
+                    }
+                }
             }
-            if (packets != lastPackets) {
-                lastPackets = packets
+            if (activity != lastPackets) {
+                lastPackets = activity
                 lastRx.set(System.currentTimeMillis())
             }
         }
