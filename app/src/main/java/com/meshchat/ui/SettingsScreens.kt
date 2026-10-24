@@ -345,14 +345,6 @@ private fun MeshTrafficSection(vm: MainViewModel) {
             Text("Off = your name and key go to direct neighbours only. Anyone else who wants to write to you asks for them first (takes a few seconds).", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
             if (m.identityFlood) OptionSlider("Repeat my identity every", IDENTITY_EVERY_OPTIONS, m.identityEveryMs, { durText(it) }) { update(m.copy(identityEveryMs = it)) }
         }
-        HorizontalDivider()
-        val legacy by AppSettings.legacyCompat.collectAsState()
-        SwitchRow("Work with older MeshChat versions (1.x)", legacy, AppSettings::setLegacyCompat)
-        Text(
-            if (legacy) "On: messages travel at most 8 hops, so phones that still have version 1.x keep working in the same mesh. Turn it off when everybody has updated, to allow up to 16 hops."
-            else "Off: up to 16 hops. Phones with version 1.x cannot read packets that travelled with more than 8 hops left, so they will miss some messages.",
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
-        )
     }
 }
 

@@ -68,11 +68,6 @@ object AppSettings {
         private set
     fun setSosIncludeLocation(v: Boolean) { sosIncludeLocation = v; prefs.edit().putBoolean("sos_include_location", v).apply() }
 
-    private val _legacyCompat = MutableStateFlow(true)
-    /** On = never send a hop limit above 8, so MeshChat 1.x phones (which drop anything higher) keep working in the same mesh. Off = up to 16 hops. */
-    val legacyCompat: StateFlow<Boolean> = _legacyCompat.asStateFlow()
-    fun setLegacyCompat(v: Boolean) { _legacyCompat.value = v; prefs.edit().putBoolean("legacy_compat", v).apply() }
-
     private val _pttEnabled = MutableStateFlow(true)
     /** Master switch for receiving push-to-talk (short clips and live sessions). Off = declined silently. */
     val pttEnabled: StateFlow<Boolean> = _pttEnabled.asStateFlow()
@@ -114,7 +109,6 @@ object AppSettings {
         _sosTone.value = if (prefs.contains("sos_tone")) prefs.getString("sos_tone", "") else null
         announceClearedAt = prefs.getLong("announce_cleared_at", 0L)
         _sosAlerts.value = prefs.getBoolean("sos_alerts", true)
-        _legacyCompat.value = prefs.getBoolean("legacy_compat", true)
         _pttEnabled.value = prefs.getBoolean("ptt_enabled", true)
         _pttAutoPlay.value = prefs.getBoolean("ptt_autoplay", true)
         _pttAutoAnswer.value = prefs.getBoolean("ptt_autoanswer", false)

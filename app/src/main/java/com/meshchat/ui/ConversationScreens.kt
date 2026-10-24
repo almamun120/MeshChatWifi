@@ -87,6 +87,7 @@ fun sendResultMessage(r: SendResult): String? = when (r) {
     SendResult.QUEUE_FULL -> "Too many photos/voice messages are waiting to be delivered. Wait for some to finish."
     SendResult.BAD_MEDIA -> "That file could not be prepared for sending"
     SendResult.NO_GROUP -> "This group no longer exists, or you are not a member of it any more"
+    SendResult.LORA_PATH -> "Photos and voice cannot cross a LoRa radio link. Send text instead, or move into Bluetooth range."
     SendResult.RATE_LIMITED -> "Public posts are limited to keep the mesh usable. Try again in a little while (Settings > Mesh traffic)."
 }
 
@@ -180,6 +181,7 @@ fun ChatScreen(vm: MainViewModel, peerId: String, onMessage: (String) -> Unit, m
     var searchOpen by remember(peerId) { mutableStateOf(false) }
     var query by remember(peerId) { mutableStateOf("") }
     val isGroup = GroupIds.isGroup(peerId)
+    val lora = peer?.viaRelay == true && !isGroup
     val group by remember(peerId) { vm.group(peerId) }.collectAsState(initial = null)
     val prefs by vm.chatPrefs.collectAsState()
     val disappearSec = prefs[peerId]?.disappearSec ?: 0
@@ -250,7 +252,7 @@ fun ChatScreen(vm: MainViewModel, peerId: String, onMessage: (String) -> Unit, m
     Column(modifier.fillMaxSize().imePadding()) {
         val info = when {
             isGroup -> "Group • ${group?.members?.split(',')?.size ?: 0} members • end-to-end encrypted, sent to each member separately"
-            peer?.reachable == true && peer.viaRelay -> "${hopsText(peer.hops)} away • through a LoRa relay: text messages may take a few minutes, photos and calls will not get through • end-to-end encrypted"
+            peer?.reachable == true && peer.viaRelay -> "${hopsText(peer.hops)} away • over a LoRa radio link: text may take a few minutes. Photos, voice, walkie-talkie, calls and files are not possible here • end-to-end encrypted"
             peer?.reachable == true -> "${hopsText(peer.hops)} away • end-to-end encrypted"
             else -> "Not in range — messages, photos and voice are saved here and delivered automatically when this person is reachable"
         }
@@ -296,7 +298,7 @@ fun ChatScreen(vm: MainViewModel, peerId: String, onMessage: (String) -> Unit, m
                 Box {
                     IconButton(onClick = { attachMenu = true }) { Icon(Icons.Default.Add, "Attach") }
                     DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
-                        DropdownMenuItem(text = { Text("🖼  Photo") }, onClick = {
+                        DropdownMenuItem(text = { Text(if (lora) "🖼  Photo (not over LoRa)" else "🖼  Photo") }, enabled = !lora, onClick = {
                             attachMenu = false
                             imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                         })
@@ -317,7 +319,7 @@ fun ChatScreen(vm: MainViewModel, peerId: String, onMessage: (String) -> Unit, m
                     val t = text
                     vm.sendPrivate(peerId, t, replyTo) { r -> if (r == SendResult.OK) { text = ""; replyTo = null } else report(r) }
                 }) { Icon(Icons.AutoMirrored.Filled.Send, "Send") }
-            } else {
+            } else if (!lora) {
                 if (text.isBlank() && !recording) {
                     MicHoldButton(
                         recording = recording && pttClip,

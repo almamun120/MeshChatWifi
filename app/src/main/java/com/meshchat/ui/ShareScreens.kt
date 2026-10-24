@@ -287,7 +287,7 @@ fun SharePeersScreen(vm: MainViewModel, onMessage: (String) -> Unit) {
             else onMessage("Nearby-devices permission is needed for file transfer")
         }
     }
-    val reachable = peers.filter { it.reachable && it.canEncrypt }
+    val reachable = peers.filter { it.reachable && it.canEncrypt && !it.viaRelay }   // files cannot cross a LoRa link
     Column(Modifier.fillMaxSize()) {
         Text(
             "Send ${selection.size} file(s) · ${formatBytes(selection.sumOf { it.size })} to:",

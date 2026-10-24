@@ -282,15 +282,16 @@ private fun MainScaffold(vm: MainViewModel, myNodeId: String, myName: String, re
                         val isGroup = com.meshchat.core.GroupIds.isGroup(cs.peerId)
                         val pref = chatPrefs[cs.peerId]
                         if (!isGroup) {
-                            IconButton(onClick = { startCall(cs.peerId, true) }) { Text("📹") }
-                            IconButton(onClick = { startCall(cs.peerId, false) }) { Icon(Icons.Default.Call, "Call") }
+                            val loraPeer = peers.firstOrNull { it.nodeId == cs.peerId }?.viaRelay == true
+                            IconButton(enabled = !loraPeer, onClick = { startCall(cs.peerId, true) }) { Text("📹") }
+                            IconButton(enabled = !loraPeer, onClick = { startCall(cs.peerId, false) }) { Icon(Icons.Default.Call, "Call") }
                         }
                         Box {
                             IconButton(onClick = { chatMenu = true }) { Text("⋮") }
                             DropdownMenu(expanded = chatMenu, onDismissRequest = { chatMenu = false }) {
                                 DropdownMenuItem(text = { Text(if (pref?.pinned == true) "Unpin chat" else "Pin chat") }, onClick = { chatMenu = false; vm.setPinned(cs.peerId, pref?.pinned != true) })
                                 DropdownMenuItem(text = { Text(if (pref?.muted == true) "Unmute notifications" else "Mute notifications") }, onClick = { chatMenu = false; vm.setChatMuted(cs.peerId, pref?.muted != true) })
-                                if (!isGroup) DropdownMenuItem(text = { Text("📻 Live walkie-talkie") }, onClick = { chatMenu = false; startCall.walkieTalkie(cs.peerId) })
+                                if (!isGroup) DropdownMenuItem(text = { Text("📻 Live walkie-talkie") }, enabled = peers.firstOrNull { it.nodeId == cs.peerId }?.viaRelay != true, onClick = { chatMenu = false; startCall.walkieTalkie(cs.peerId) })
                                 DropdownMenuItem(text = { Text("Disappearing messages…") }, onClick = { chatMenu = false; confirm = "disappear" })
                                 if (isGroup) DropdownMenuItem(text = { Text("Group info & settings") }, onClick = { chatMenu = false; confirm = "groupinfo" })
                                 DropdownMenuItem(text = { Text("Clear chat") }, onClick = { chatMenu = false; confirm = "clear" })

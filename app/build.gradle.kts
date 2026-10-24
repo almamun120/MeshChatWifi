@@ -14,8 +14,8 @@ android {
         minSdk = 26
         targetSdk = 35
         // CI passes -PversionCode=<run number> -PversionName=<tag without v>; local builds use the defaults.
-        versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 210
-        versionName = (project.findProperty("versionName") as String?) ?: "2.10"
+        versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 211
+        versionName = (project.findProperty("versionName") as String?) ?: "2.11"
     }
 
     // ---- Release signing. NEVER commit the keystore or passwords.

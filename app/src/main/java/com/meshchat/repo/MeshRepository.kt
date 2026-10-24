@@ -29,7 +29,6 @@ import com.meshchat.core.MeshEvent
 import com.meshchat.core.MeshStats
 import com.meshchat.core.Neighbor
 import com.meshchat.core.NodeIds
-import com.meshchat.core.Protocol
 import com.meshchat.core.Route
 import com.meshchat.core.SendResult
 import com.meshchat.core.TransportStatus
@@ -74,7 +73,7 @@ data class PeerUi(
     val reachable: Boolean,
     val canEncrypt: Boolean,   // we hold their public key
     val email: String = "",
-    /** The way to this person starts at a LoRa relay: messages may take minutes, pictures/calls will not cross the radio. */
+    /** The way to this person crosses a LoRa radio link: text may take a few minutes, voice/photos/files/calls cannot cross. */
     val viaRelay: Boolean = false,
 )
 
@@ -293,7 +292,7 @@ class MeshRepository(private val context: Context) {
                 myEmail = user.email
 
                 val transport = BleTransport(appContext, identity.nodeId, Cap.ALL, scope)
-                val engine = MeshEngine(identity, { myName }, com.meshchat.core.TtlClampTransport(transport) { if (com.meshchat.data.AppSettings.legacyCompat.value) 8 else Protocol.MAX_HOPS }, store, scope, pttAllowed = { com.meshchat.data.AppSettings.pttEnabled.value }, emailProvider = { myEmail }, floodSettings = { com.meshchat.data.AppSettings.floodSettings.value })
+                val engine = MeshEngine(identity, { myName }, transport, store, scope, pttAllowed = { com.meshchat.data.AppSettings.pttEnabled.value }, emailProvider = { myEmail }, floodSettings = { com.meshchat.data.AppSettings.floodSettings.value })
                 transportFlow.value = transport
                 engineFlow.value = engine
                 val signaler = object : CallSignaler {
@@ -483,7 +482,7 @@ class MeshRepository(private val context: Context) {
                 reachable = reachable,
                 email = node?.email ?: "",
                 canEncrypt = node?.publicKey != null,
-                viaRelay = route != null && route.nextHop != id && (nbrById[route.nextHop]?.caps ?: 0) and Cap.LORA != 0,
+                viaRelay = route?.lora == true,
             )
         }.filter { it.reachable || it.canEncrypt }
             .sortedWith(compareByDescending<PeerUi> { it.reachable }.thenBy { it.hops ?: 99 }.thenBy { it.name.lowercase() })

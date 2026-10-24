@@ -52,7 +52,7 @@ class NeighborTable(private val timeoutMs: Long) {
     fun snapshot(): List<Neighbor> = map.values.sortedByDescending { if (it.rssi == 0) -999 else it.rssi }
 }
 
-data class Route(val dest: String, val nextHop: String, val hops: Int, val updated: Long)
+data class Route(val dest: String, val nextHop: String, val hops: Int, val updated: Long, val lora: Boolean = false)
 
 /** Distance-vector table. Application-level routing: next hop is always a directly linked peer. */
 class RoutingTable(private val ttlMs: Long) {
@@ -60,11 +60,11 @@ class RoutingTable(private val ttlMs: Long) {
 
     /** Returns true if the table changed in a way that matters (new dest / next hop / hop count). */
     @Synchronized
-    fun update(dest: String, nextHop: String, hops: Int, now: Long): Boolean {
+    fun update(dest: String, nextHop: String, hops: Int, now: Long, lora: Boolean = false): Boolean {
         val e = map[dest]
         if (e == null || e.nextHop == nextHop || hops < e.hops || now - e.updated > ttlMs) {
-            map[dest] = Route(dest, nextHop, hops, now)
-            return e == null || e.nextHop != nextHop || e.hops != hops
+            map[dest] = Route(dest, nextHop, hops, now, lora)
+            return e == null || e.nextHop != nextHop || e.hops != hops || e.lora != lora
         }
         return false
     }
@@ -99,5 +99,5 @@ class RoutingTable(private val ttlMs: Long) {
             .filter { it.nextHop != peer && it.dest != peer && now - it.updated <= ttlMs && it.hops < Protocol.MAX_HOPS }
             .sortedBy { it.hops }
             .take(limit)
-            .map { RouteAd(it.dest, it.hops) }
+            .map { RouteAd(it.dest, it.hops, it.lora) }
 }

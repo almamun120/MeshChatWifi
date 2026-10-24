@@ -98,7 +98,7 @@ sealed interface MeshEvent {
     class GroupGone(val groupId: String, val name: String, val deleted: Boolean) : MeshEvent
 }
 
-enum class SendResult { OK, EMPTY, TOO_LONG, NO_KEY, SELF, NOT_RUNNING, QUEUE_FULL, BAD_MEDIA, NO_GROUP, RATE_LIMITED }
+enum class SendResult { OK, EMPTY, TOO_LONG, NO_KEY, SELF, NOT_RUNNING, QUEUE_FULL, BAD_MEDIA, NO_GROUP, RATE_LIMITED, LORA_PATH }
 
 /**
  * The mesh brain. Pure Kotlin + coroutines (no Android classes), so it is unit-testable on the JVM.
@@ -322,6 +322,7 @@ class MeshEngine(
             if (t.length > Protocol.MAX_PRIVATE_CHARS) return SendResult.TOO_LONG
         }
         val c = normalized(content)!!
+        if (c.isMedia && isLoraPath(peerId)) return SendResult.LORA_PATH
         val peerKey = store.getNode(peerId)?.publicKey ?: fetchPeerKey(peerId, waitForKey) ?: return SendResult.NO_KEY
         val plain = ContentCodec.encode(c) ?: return SendResult.BAD_MEDIA
         val id = newMsgId()
@@ -480,14 +481,14 @@ class MeshEngine(
     /** True when [peerId] is a LoRa relay (it says so in its advertisement). */
     fun isBridge(peerId: String): Boolean = neighborTable.capsOf(peerId) and Cap.LORA != 0
 
-    /** True when the way to [peerId] starts at a LoRa relay: delivery may be slow, and big transfers will not make it across the radio. */
-    fun isViaBridge(peerId: String): Boolean {
-        val hop = routingTable.lookup(peerId, clock())?.nextHop ?: return false
-        return hop != peerId && isBridge(hop)
-    }
+    /**
+     * True when the way to [peerId] crosses a LoRa radio link (a relay says so in its route advertisements): text is slow but
+     * works; photos, voice, calls, walkie-talkie and file transfer cannot cross the radio.
+     */
+    fun isLoraPath(peerId: String): Boolean = routingTable.lookup(peerId, clock())?.lora == true
 
     fun isReachable(peerId: String): Boolean =
-        routingTable.lookup(peerId, clock())?.nextHop?.let { it in transport.linkedPeers() } == true
+        routingTable.lookup(peerId, clock())?.let { !it.lora && it.nextHop in transport.linkedPeers() } == true
 
     /**
      * Sends one encrypted session signal. These are real-time: they are NEVER parked in the pending table (a ring
@@ -671,7 +672,7 @@ class MeshEngine(
             if (ad.nodeId == myId || ad.nodeId == pkt.src || !NodeIds.isValid(ad.nodeId)) continue
             val hops = ad.hops + 1
             if (hops > Protocol.MAX_HOPS) continue
-            if (routingTable.update(ad.nodeId, pkt.src, hops, now)) changed = true
+            if (routingTable.update(ad.nodeId, pkt.src, hops, now, ad.lora)) changed = true
         }
         publish(now)
         if (changed) scope.launch { flushQueues() }
@@ -1358,7 +1359,7 @@ class MeshEngine(
                 if (route.nextHop !in transport.linkedPeers()) continue
                 if (rec.attempts > 0) {
                     var wait = config.retryBackoffMs[minOf(rec.attempts - 1, config.retryBackoffMs.size - 1)]
-                    if (isBridge(route.nextHop) && rec.dst != route.nextHop) wait *= config.bridgeBackoffFactor
+                    if (route.lora) wait *= config.bridgeBackoffFactor
                     if (now - rec.lastAttempt < wait) continue
                     if (rec.attempts >= config.maxAttempts) {
                         store.deletePending(rec.key)

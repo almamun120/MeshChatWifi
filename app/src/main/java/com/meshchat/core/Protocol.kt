@@ -180,7 +180,8 @@ data class PacketRef(val src: String, val msgIdHex: String) {
     val key: String get() = "$src:$msgIdHex"
 }
 
-data class RouteAd(val nodeId: String, val hops: Int)
+/** [lora] = the way to [nodeId] crosses a LoRa radio link somewhere (v2.10). It travels in the top bit of the hop byte. */
+data class RouteAd(val nodeId: String, val hops: Int, val lora: Boolean = false)
 
 /** Payload encoders/decoders. DOB and GPS have no field in any payload, by design. */
 object Payloads {
@@ -233,7 +234,7 @@ object Payloads {
         b.put(routes.size.toByte())
         for (r in routes) {
             b.put(NodeIds.toBytes(r.nodeId))
-            b.put(r.hops.toByte())
+            b.put((r.hops.coerceIn(0, 127) or (if (r.lora) 0x80 else 0)).toByte())
         }
         return b.array()
     }
@@ -249,8 +250,8 @@ object Payloads {
         val routes = ArrayList<RouteAd>(n)
         repeat(n) {
             val id = Hex.encode(ByteArray(4).also { b.get(it) })
-            val hops = b.get().toInt() and 0xFF
-            routes.add(RouteAd(id, hops))
+            val raw = b.get().toInt() and 0xFF
+            routes.add(RouteAd(id, raw and 0x7F, raw and 0x80 != 0))
         }
         Hello(name, caps, routes)
         } catch (e: Exception) {

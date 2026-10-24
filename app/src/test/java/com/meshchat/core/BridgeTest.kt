@@ -13,7 +13,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** v2.10: LoRa relay recognition and compatibility with MeshChat 1.x. */
+/** v2.10: LoRa relay recognition and LoRa-path routes (what cannot cross a radio link is refused). */
 class BridgeTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val net = FakeNet()
@@ -44,51 +44,50 @@ class BridgeTest {
     }
 
     @Test
-    fun hopLimitIsCappedForOldPhones() = runBlocking {
-        val a = FakeTransport("A", net)
-        val b = FakeTransport("B", net)
-        net.link("A", "B")
-        val seen = ArrayList<Int>()
-        a.dropHook = { _, data -> seen.add(data[3].toInt() and 0xFF); false }
-        var limit = 8
-        val clamp = TtlClampTransport(a) { limit }
-        fun packet(ttl: Int) = ByteArray(40).also { it[3] = ttl.toByte(); it[39] = 7 }
-        assertTrue(clamp.send("B", Channel.MSG, packet(15)))
-        assertTrue(clamp.send("B", Channel.MSG, packet(5)))
-        limit = 16
-        assertTrue(clamp.send("B", Channel.MSG, packet(15)))
-        assertEquals(listOf(8, 5, 15), seen)
+    fun loraFlagSurvivesTheHelloCodec() {
+        val hello = Payloads.Hello("R", Cap.CHAT or Cap.RELAY or Cap.LORA, listOf(RouteAd("0A0B0C0D", 3, true), RouteAd("01020304", 2, false), RouteAd("F0F0F0F0", 16, true)))
+        val back = Payloads.decodeHello(Payloads.encodeHello(hello))!!
+        assertEquals(3, back.routes.size)
+        assertEquals(RouteAd("0A0B0C0D", 3, true), back.routes[0])
+        assertEquals(RouteAd("01020304", 2, false), back.routes[1])
+        assertEquals(RouteAd("F0F0F0F0", 16, true), back.routes[2])
     }
 
     @Test
-    fun clampKeepsTheRestOfThePacketIntact() = runBlocking {
-        val a = FakeTransport("A", net)
-        FakeTransport("B", net)
-        net.link("A", "B")
-        var got: ByteArray? = null
-        a.dropHook = { _, data -> got = data; false }
-        val src = ByteArray(64) { (it * 3).toByte() }.also { it[3] = 15 }
-        TtlClampTransport(a) { 8 }.send("B", Channel.MSG, src)
-        val out = got!!
-        assertEquals(8, out[3].toInt())
-        for (i in src.indices) if (i != 3) assertEquals(src[i], out[i])
-        assertEquals(15, src[3].toInt())                // the caller's array is not modified
+    fun routeTableKeepsAndAdvertisesTheFlag() {
+        val t = RoutingTable(60_000)
+        assertTrue(t.update("aa", "n1", 3, 0, lora = true))
+        assertTrue(t.lookup("aa", 1)!!.lora)
+        assertTrue(t.advertisementsFor("other", 1, 10).single().lora)
+        t.update("bb", "n1", 2, 0)
+        assertFalse(t.lookup("bb", 1)!!.lora)
     }
 
     @Test
     fun relayIsRecognisedFromItsAdvertisement() = runBlocking {
         val a = node("A")
         val relay = node("Relay")
-        val far = node("Far")
         net.link(a.id.nodeId, relay.id.nodeId)
-        net.link(relay.id.nodeId, far.id.nodeId)
         a.radio.advert(relay.id.nodeId, Cap.CHAT or Cap.RELAY or Cap.LORA)
-        a.radio.advert(far.id.nodeId, Cap.ALL)
         until("relay noticed") { a.engine.isBridge(relay.id.nodeId) }
-        assertFalse(a.engine.isBridge(far.id.nodeId))
-        until("route to far") { a.engine.isReachable(far.id.nodeId) }
-        assertTrue(a.engine.isViaBridge(far.id.nodeId))         // the way to Far starts at the relay
-        assertFalse(a.engine.isViaBridge(relay.id.nodeId))      // the relay itself is a direct neighbour
+        assertFalse(a.engine.isBridge("deadbeef"))
+    }
+
+    @Test
+    fun nodesBehindARadioLinkCannotGetPhotosCallsOrFiles() = runBlocking {
+        val a = node("A")
+        val relayId = Identity.generate().nodeId
+        val far = Identity.generate()
+        val relayRadio = FakeTransport(relayId, net)
+        net.link(a.id.nodeId, relayId)
+        // the relay tells A: "far" is reachable, over a radio link
+        val hello = Payloads.encodeHello(Payloads.Hello("Relay", Cap.CHAT or Cap.RELAY or Cap.LORA, listOf(RouteAd(far.nodeId, 2, true))))
+        val pkt = MeshPacket(PacketType.HELLO, 0, 1, 0, ByteArray(8) { 7 }, relayId, a.id.nodeId, System.currentTimeMillis(), hello)
+        relayRadio.send(a.id.nodeId, Channel.CONTROL, pkt.encode())
+        until("route learned") { a.engine.isLoraPath(far.nodeId) }
+        assertFalse(a.engine.isReachable(far.nodeId))                  // calls and file transfers need a live path
+        assertEquals(SendResult.LORA_PATH, a.engine.sendContent(far.nodeId, Content.ofImage(ByteArray(300) { it.toByte() })))
+        assertEquals(SendResult.LORA_PATH, a.engine.sendContent(far.nodeId, Content.ofVoice(0, 1000, ByteArray(0), ByteArray(200))))
     }
 
     @Test
