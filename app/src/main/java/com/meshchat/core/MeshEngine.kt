@@ -176,6 +176,11 @@ class MeshEngine(
     private val _neighbors = MutableStateFlow<List<Neighbor>>(emptyList())
     val neighbors: StateFlow<List<Neighbor>> = _neighbors.asStateFlow()
 
+    /** Last weather report heard from each weather station (a relay with a BMP280), by node id. Kept in memory only: it is a live value. */
+    data class WeatherInfo(val tempC: Double, val hpa: Double, val at: Long)
+    private val _weather = MutableStateFlow<Map<String, WeatherInfo>>(emptyMap())
+    val weather: StateFlow<Map<String, WeatherInfo>> = _weather.asStateFlow()
+
     private val _routes = MutableStateFlow<List<Route>>(emptyList())
     val routes: StateFlow<List<Route>> = _routes.asStateFlow()
 
@@ -777,6 +782,7 @@ class MeshEngine(
             return
         }
         store.upsertNodeIdentity(pkt.src, id.name, id.publicKey, clock(), id.email)
+        id.weather?.let { w -> _weather.update { old -> old + (pkt.src to WeatherInfo(w.tempC, w.hpa, clock())) } }
         releaseParked(pkt.src)
         when {
             pkt.isBroadcast -> forwardBroadcast(pkt, from)

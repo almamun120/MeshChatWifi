@@ -75,6 +75,8 @@ data class PeerUi(
     val email: String = "",
     /** The way to this person crosses a LoRa radio link: text may take a few minutes, voice/photos/files/calls cannot cross. */
     val viaRelay: Boolean = false,
+    /** A weather station (a relay with a BMP280): the reading that came with its identity, shown next to the name. */
+    val weather: MeshEngine.WeatherInfo? = null,
 )
 
 data class ChatRow(
@@ -451,6 +453,7 @@ class MeshRepository(private val context: Context) {
 
     val neighbors: Flow<List<Neighbor>> = engineFlow.flatMapLatest { it?.neighbors ?: flowOf(emptyList()) }
     val routes: Flow<List<Route>> = engineFlow.flatMapLatest { it?.routes ?: flowOf(emptyList()) }
+    val weather: Flow<Map<String, MeshEngine.WeatherInfo>> = engineFlow.flatMapLatest { it?.weather ?: flowOf(emptyMap()) }
     /** Crowd density around this phone and the relay rules in force (null while the mesh is not running). */
     val floodStatus: Flow<FloodStatus?> = engineFlow.flatMapLatest { it?.floodStatus ?: flowOf(null) }
     val mediaProgress: Flow<Map<String, Float>> = engineFlow.flatMapLatest { it?.mediaProgress ?: flowOf(emptyMap()) }
@@ -461,7 +464,7 @@ class MeshRepository(private val context: Context) {
     val posts: Flow<List<PublicPostEntity>> = db.postDao().observeRecent(300)
 
     /** Everyone reachable now (route table) or heard directly (advertisements), plus known-but-away nodes. */
-    val peers: Flow<List<PeerUi>> = combine(neighbors, routes, db.nodeDao().observeAll()) { nbrs, rts, nodes ->
+    val peers: Flow<List<PeerUi>> = combine(neighbors, routes, db.nodeDao().observeAll(), weather) { nbrs, rts, nodes, wx ->
         val byId = nodes.associateBy { it.nodeId }
         val nbrById = nbrs.associateBy { it.nodeId }
         val routeById = rts.associateBy { it.dest }
@@ -483,6 +486,7 @@ class MeshRepository(private val context: Context) {
                 email = node?.email ?: "",
                 canEncrypt = node?.publicKey != null,
                 viaRelay = route?.lora == true,
+                weather = wx[id],
             )
         }.filter { it.reachable || it.canEncrypt }
             .sortedWith(compareByDescending<PeerUi> { it.reachable }.thenBy { it.hops ?: 99 }.thenBy { it.name.lowercase() })

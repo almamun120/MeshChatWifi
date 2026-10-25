@@ -216,6 +216,12 @@ private fun PeerRow(p: PeerUi, now: Long, onDelete: (() -> Unit)?, onClick: () -
                 if (p.rssi != null) append(" • ${p.rssi} dBm")
             }
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            p.weather?.let { w ->
+                Text(
+                    "🌡 ${"%.1f".format(w.tempC)} °C  ·  ${"%.1f".format(w.hpa)} hPa  ·  ${agoText(now, w.at)}",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary, maxLines = 1,
+                )
+            }
             if (p.email.isNotEmpty()) Text(p.email, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(NodeIds.display(p.nodeId), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
         }

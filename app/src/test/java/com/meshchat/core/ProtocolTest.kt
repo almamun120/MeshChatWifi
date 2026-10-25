@@ -56,6 +56,32 @@ class ProtocolTest {
     }
 
     @Test
+    fun identityWeatherRidesAlongWithTheIdentity() {
+        val key = Identity.generate().publicBytes
+        val plain = Payloads.encodeIdentity(Payloads.Identity(11, "Relay", key))
+        // without weather the bytes are the old format, so older builds keep accepting the identity
+        assertNull(Payloads.decodeIdentity(plain)!!.weather)
+        val wx = Payloads.encodeIdentity(Payloads.Identity(11, "Relay", key, weather = Payloads.Weather(-40, 9950)))
+        // old bytes + empty e-mail slot (0) + tempC*10 (int16) + hPa*10 (uint16), big-endian (same bytes as the relay firmware writes)
+        assertEquals(plain.size + 1 + 4, wx.size)
+        assertArrayEquals(plain, wx.copyOfRange(0, plain.size))
+        assertArrayEquals(byteArrayOf(0, 0xFF.toByte(), 0xD8.toByte(), 0x26, 0xDE.toByte()), wx.copyOfRange(plain.size, wx.size))
+        val back = Payloads.decodeIdentity(wx)!!
+        assertEquals(-4.0, back.weather!!.tempC, 0.001)
+        assertEquals(995.0, back.weather!!.hpa, 0.001)
+        assertEquals("", back.email)
+        // with an e-mail too
+        val both = Payloads.decodeIdentity(Payloads.encodeIdentity(Payloads.Identity(11, "Relay", key, "a@b.c", Payloads.Weather(275, 10082))))!!
+        assertEquals("a@b.c", both.email)
+        assertEquals(27.5, both.weather!!.tempC, 0.001)
+        assertEquals(1008.2, both.weather!!.hpa, 0.001)
+        // half a weather field, or numbers nobody could measure, are malformed
+        assertNull(Payloads.decodeIdentity(wx.copyOf(wx.size - 1)))
+        val absurd = wx.copyOf(); absurd[absurd.size - 4] = 0x7F
+        assertNull(Payloads.decodeIdentity(absurd))
+    }
+
+    @Test
     fun helloAnnounceIdentityRefsRoundTrip() {
         val h = Payloads.Hello("আব্দুল্লাহ", Cap.ALL, listOf(RouteAd("AABBCCDD", 2), RouteAd("01020304", 3)))
         val h2 = Payloads.decodeHello(Payloads.encodeHello(h))!!

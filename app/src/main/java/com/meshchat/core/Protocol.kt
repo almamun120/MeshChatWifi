@@ -187,7 +187,13 @@ data class RouteAd(val nodeId: String, val hops: Int, val lora: Boolean = false)
 object Payloads {
 
     data class Hello(val name: String, val caps: Int, val routes: List<RouteAd>)
-    data class Identity(val caps: Int, val name: String, val publicKey: ByteArray, val email: String = "")
+    /** A weather station's reading (BMP280) riding along with its identity: tenths of a degree Celsius and tenths of a hectopascal. */
+    data class Weather(val tempC10: Int, val hpa10: Int) {
+        val tempC: Double get() = tempC10 / 10.0
+        val hpa: Double get() = hpa10 / 10.0
+        fun valid() = tempC10 in -600..800 && hpa10 in 3000..11000
+    }
+    data class Identity(val caps: Int, val name: String, val publicKey: ByteArray, val email: String = "", val weather: Weather? = null)
 
     const val MAX_EMAIL_BYTES = 64
     data class Announce(val authorName: String, val content: String)
@@ -264,12 +270,15 @@ object Payloads {
         // Optional e-mail goes after the key. Without one the bytes are exactly the old format, so phones on older
         // builds keep accepting this identity; only identities that carry an e-mail need the newer build.
         val emailBytes = clampUtf8(i.email.trim(), MAX_EMAIL_BYTES)
-        val extra = if (emailBytes.isEmpty()) 0 else 1 + emailBytes.size
+        // Weather goes behind the e-mail slot (written even when empty) as tempC*10 (int16) + hPa*10 (uint16), big-endian.
+        val wx = i.weather?.takeIf { it.valid() }
+        val extra = (if (emailBytes.isEmpty() && wx == null) 0 else 1 + emailBytes.size) + (if (wx != null) 4 else 0)
         val b = ByteBuffer.allocate(1 + 1 + nameBytes.size + 1 + i.publicKey.size + extra)
         b.put(i.caps.toByte())
         b.put(nameBytes.size.toByte()).put(nameBytes)
         b.put(i.publicKey.size.toByte()).put(i.publicKey)
-        if (emailBytes.isNotEmpty()) b.put(emailBytes.size.toByte()).put(emailBytes)
+        if (emailBytes.isNotEmpty() || wx != null) b.put(emailBytes.size.toByte()).put(emailBytes)
+        if (wx != null) b.putShort(wx.tempC10.toShort()).putShort(wx.hpa10.toShort())
         return b.array()
     }
 
@@ -283,8 +292,14 @@ object Payloads {
         if (kl == 0 || b.remaining() < kl) return null
         val key = ByteArray(kl).also { b.get(it) }
         val email = if (b.hasRemaining()) (b.getShortStr() ?: return null) else ""
+        var weather: Weather? = null
+        if (b.hasRemaining()) {
+            if (b.remaining() != 4) return null
+            weather = Weather(b.getShort().toInt(), b.getShort().toInt() and 0xFFFF)
+            if (!weather.valid()) return null
+        }
         if (b.hasRemaining()) return null
-        Identity(caps, name, key, email)
+        Identity(caps, name, key, email, weather)
         } catch (e: Exception) {
             null
         }
